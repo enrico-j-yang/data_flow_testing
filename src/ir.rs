@@ -82,6 +82,12 @@ impl Default for AnalysisCache {
     }
 }
 
+impl AnalysisCache {
+    pub fn imports(&self) -> Vec<&ImportRecord> {
+        self.modules.iter().flat_map(|m| m.imports.iter()).collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceFileRecord {
     pub file_id: String,
