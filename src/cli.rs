@@ -1,6 +1,6 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use clap::{CommandFactory, Parser, Subcommand};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -33,6 +33,22 @@ pub enum Commands {
     },
 }
 
+fn print_default_help() -> Result<()> {
+    let mut command = Cli::command();
+
+    if let Some(bin_name) = std::env::args_os()
+        .next()
+        .as_deref()
+        .and_then(|arg0| Path::new(arg0).file_name())
+    {
+        command = command.bin_name(bin_name.to_string_lossy().into_owned());
+    }
+
+    command.print_help()?;
+    println!();
+    Ok(())
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -44,9 +60,6 @@ pub fn run() -> Result<()> {
             println!("paths command is available");
             Ok(())
         }
-        None => {
-            Cli::parse_from(["data-flow-analyzer", "--help"]);
-            Ok(())
-        }
+        None => print_default_help(),
     }
 }
