@@ -42,9 +42,20 @@ pub struct AnalysisCache {
     pub schema_version: u32,
     pub tool_version: String,
     pub files: Vec<SourceFileRecord>,
+    pub modules: Vec<ModuleRecord>,
+    pub scopes: Vec<ScopeRecord>,
+    pub classes: Vec<ClassRecord>,
+    pub functions: Vec<FunctionRecord>,
     pub definitions: Vec<Definition>,
     pub uses: Vec<Use>,
+    pub captures: Vec<CaptureRecord>,
+    pub calls: Vec<CallRecord>,
+    pub cfgs: Vec<CfgRecord>,
+    pub def_use_edges: Vec<DefUseEdge>,
+    pub var_dependency_edges: Vec<VarDependencyEdge>,
+    pub function_summaries: Vec<FunctionSummary>,
     pub diagnostics: Vec<Diagnostic>,
+    pub graph_index: Vec<GraphRecord>,
 }
 
 impl Default for AnalysisCache {
@@ -53,9 +64,20 @@ impl Default for AnalysisCache {
             schema_version: SCHEMA_VERSION,
             tool_version: String::new(),
             files: Vec::new(),
+            modules: Vec::new(),
+            scopes: Vec::new(),
+            classes: Vec::new(),
+            functions: Vec::new(),
             definitions: Vec::new(),
             uses: Vec::new(),
+            captures: Vec::new(),
+            calls: Vec::new(),
+            cfgs: Vec::new(),
+            def_use_edges: Vec::new(),
+            var_dependency_edges: Vec::new(),
+            function_summaries: Vec::new(),
             diagnostics: Vec::new(),
+            graph_index: Vec::new(),
         }
     }
 }
@@ -79,11 +101,152 @@ pub struct Diagnostic {
     pub span: SourceSpan,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleRecord {
+    pub module_id: String,
+    pub file_id: String,
+    pub module_name: String,
+    pub exports: Vec<String>,
+    pub imports: Vec<ImportRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportRecord {
+    pub import_id: String,
+    pub module: String,
+    pub name: Option<String>,
+    pub alias: Option<String>,
+    pub level: usize,
+    pub resolution: String,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeRecord {
+    pub scope_id: String,
+    pub scope_kind: String,
+    pub parent_scope_id: Option<String>,
+    pub owner_id: String,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClassRecord {
+    pub class_id: String,
+    pub module_id: String,
+    pub qualified_name: String,
+    pub base_exprs: Vec<String>,
+    pub resolved_bases: Vec<String>,
+    pub mro_status: String,
+    pub methods: Vec<String>,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionRecord {
+    pub function_id: String,
+    pub module_id: String,
+    pub class_id: Option<String>,
+    pub qualified_name: String,
+    pub kind: String,
+    pub params: Vec<String>,
+    pub scope_id: String,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureRecord {
+    pub capture_id: String,
+    pub source_scope_id: String,
+    pub target_function_id: String,
+    pub place: Place,
+    pub mode: String,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallRecord {
+    pub call_id: String,
+    pub function_id: Option<String>,
+    pub callee_expr: String,
+    pub candidate_function_ids: Vec<String>,
+    pub resolution: String,
+    pub arg_use_ids: Vec<String>,
+    pub return_target_def_id: Option<String>,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CfgRecord {
+    pub function_id: String,
+    pub blocks: Vec<CfgBlock>,
+    pub edges: Vec<CfgEdge>,
+    pub entry_block_id: String,
+    pub exit_block_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CfgBlock {
+    pub block_id: String,
+    pub block_kind: String,
+    pub statements: Vec<String>,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CfgEdge {
+    pub edge_id: String,
+    pub from_block_id: String,
+    pub to_block_id: String,
+    pub edge_kind: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DefUseEdge {
+    pub edge_id: String,
+    pub def_id: String,
+    pub use_id: String,
+    pub place: Place,
+    pub edge_kind: String,
+    pub path_summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VarDependencyEdge {
+    pub edge_id: String,
+    pub source_place: Place,
+    pub target_place: Place,
+    pub source_id: String,
+    pub target_id: String,
+    pub dep_kind: String,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionSummary {
+    pub function_id: String,
+    pub inputs: Vec<Place>,
+    pub returns: Vec<Place>,
+    pub yields: Vec<Place>,
+    pub writes: Vec<Place>,
+    pub raises: Vec<Place>,
+    pub external_effects: Vec<String>,
+    pub fixpoint_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphRecord {
+    pub graph_id: String,
+    pub kind: String,
+    pub dot_path: String,
+    pub svg_path: Option<String>,
+    pub html_path: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        AnalysisCache, Definition, Diagnostic, Place, SCHEMA_VERSION, SourceFileRecord, Use,
-    };
+    use super::*;
     use crate::source::SourceSpan;
 
     #[test]
@@ -104,6 +267,10 @@ mod tests {
                 line_count: 12,
                 parse_status: "ok".to_string(),
             }],
+            modules: Vec::new(),
+            scopes: Vec::new(),
+            classes: Vec::new(),
+            functions: Vec::new(),
             definitions: vec![Definition {
                 def_id: "D_deadbeef".to_string(),
                 place: Place::Local {
@@ -132,6 +299,12 @@ mod tests {
                 span: span.clone(),
                 context: "rhs".to_string(),
             }],
+            captures: Vec::new(),
+            calls: Vec::new(),
+            cfgs: Vec::new(),
+            def_use_edges: Vec::new(),
+            var_dependency_edges: Vec::new(),
+            function_summaries: Vec::new(),
             diagnostics: vec![Diagnostic {
                 diagnostic_id: "G_deadbeef".to_string(),
                 severity: "warning".to_string(),
@@ -140,6 +313,7 @@ mod tests {
                 file: "app/main.py".to_string(),
                 span,
             }],
+            graph_index: Vec::new(),
         };
 
         let json = serde_json::to_string(&cache).expect("serialize cache");
@@ -204,5 +378,57 @@ mod tests {
             round_trip.diagnostics[0].span,
             SourceSpan::synthetic("app/main.py", "x = y")
         );
+    }
+
+    #[test]
+    fn cache_round_trips_rich_ir() {
+        let cache = AnalysisCache {
+            schema_version: SCHEMA_VERSION,
+            tool_version: "0.1.0".to_string(),
+            files: vec![SourceFileRecord {
+                file_id: "M_a".to_string(),
+                path: "app/a.py".to_string(),
+                hash: "abc".to_string(),
+                line_count: 3,
+                parse_status: "ok".to_string(),
+            }],
+            modules: vec![ModuleRecord {
+                module_id: "M_a".to_string(),
+                file_id: "M_a".to_string(),
+                module_name: "app.a".to_string(),
+                exports: vec!["foo".to_string()],
+                imports: Vec::new(),
+            }],
+            scopes: Vec::new(),
+            classes: Vec::new(),
+            functions: Vec::new(),
+            definitions: vec![Definition {
+                def_id: "D_x".to_string(),
+                place: Place::Local {
+                    scope_id: "S_a".to_string(),
+                    name: "x".to_string(),
+                },
+                def_kind: "assign".to_string(),
+                scope_id: "S_a".to_string(),
+                function_id: None,
+                span: SourceSpan::synthetic("app/a.py", "x = 1"),
+                expr: "1".to_string(),
+                deps: Vec::new(),
+            }],
+            uses: Vec::new(),
+            captures: Vec::new(),
+            calls: Vec::new(),
+            cfgs: Vec::new(),
+            def_use_edges: Vec::new(),
+            var_dependency_edges: Vec::new(),
+            function_summaries: Vec::new(),
+            diagnostics: Vec::new(),
+            graph_index: Vec::new(),
+        };
+
+        let json = serde_json::to_string(&cache).unwrap();
+        let decoded: AnalysisCache = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.schema_version, SCHEMA_VERSION);
+        assert_eq!(decoded.definitions[0].def_kind, "assign");
     }
 }
