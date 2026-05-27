@@ -2,8 +2,8 @@ use super::LanguageFrontend;
 use crate::fs::SourceFile;
 use crate::ids::stable_id;
 use crate::ir::{
-    AnalysisCache, ClassRecord, Definition, FunctionRecord, ImportRecord, ModuleRecord, Place,
-    ScopeRecord, SourceFileRecord, Use, SCHEMA_VERSION,
+    AnalysisCache, CaptureRecord, ClassRecord, Definition, FunctionRecord, ImportRecord,
+    ModuleRecord, Place, ScopeRecord, SourceFileRecord, Use, SCHEMA_VERSION,
 };
 use crate::source::SourceSpan;
 use anyhow::{anyhow, Context, Result};
@@ -360,7 +360,7 @@ impl PythonFrontend {
             class_id: direct_class_owner.clone(),
             qualified_name: qualified_name.clone(),
             kind: kind.to_string(),
-            params,
+            params: params.clone(),
             scope_id: scope_id.clone(),
             span: self.span(ctx.file, ctx.source, node),
         });
@@ -388,6 +388,8 @@ impl PythonFrontend {
             global_decls: declarations.global_decls,
             nonlocal_decls: declarations.nonlocal_decls,
         });
+
+        self.lower_parameter_definitions(cache, ctx, node, &params);
 
         if let Some(body) = node.child_by_field_name("body") {
             let mut cursor = body.walk();
@@ -428,6 +430,7 @@ impl PythonFrontend {
             let Some(place) = self.target_place_for_node(ctx, target) else {
                 continue;
             };
+            self.push_capture_record(cache, ctx, &place, "write", target);
             let location = format!(
                 "{}:{}",
                 target.start_position().row + 1,
@@ -496,8 +499,89 @@ impl PythonFrontend {
             span: self.span(ctx.file, ctx.source, node),
             context: context.to_string(),
         });
+        self.push_capture_record(cache, ctx, &place, "read", node);
 
         Some(place)
+    }
+
+    fn lower_parameter_definitions(
+        &self,
+        cache: &mut AnalysisCache,
+        ctx: &LoweringContext<'_>,
+        node: Node<'_>,
+        params: &[String],
+    ) {
+        let Some(function_frame) = ctx.function_stack.last() else {
+            return;
+        };
+
+        let span_node = node.child_by_field_name("parameters").unwrap_or(node);
+        for (index, name) in params.iter().enumerate() {
+            cache.definitions.push(Definition {
+                def_id: stable_id(
+                    "D",
+                    SCHEMA_VERSION,
+                    &[
+                        &ctx.file.relative_path,
+                        &function_frame.function_id,
+                        "param",
+                        name,
+                        &index.to_string(),
+                    ],
+                ),
+                place: Place::Local {
+                    scope_id: function_frame.scope_id.clone(),
+                    name: name.clone(),
+                },
+                def_kind: "param".to_string(),
+                scope_id: function_frame.scope_id.clone(),
+                function_id: Some(function_frame.function_id.clone()),
+                span: self.span(ctx.file, ctx.source, span_node),
+                expr: String::new(),
+                deps: Vec::new(),
+            });
+        }
+    }
+
+    fn push_capture_record(
+        &self,
+        cache: &mut AnalysisCache,
+        ctx: &LoweringContext<'_>,
+        place: &Place,
+        mode: &str,
+        node: Node<'_>,
+    ) {
+        let Some(target_function_id) = ctx.current_function_id() else {
+            return;
+        };
+        let Place::Closure { scope_id, name } = place else {
+            return;
+        };
+        let location = format!(
+            "{}:{}",
+            node.start_position().row + 1,
+            node.start_position().column + 1
+        );
+
+        cache.captures.push(CaptureRecord {
+            capture_id: stable_id(
+                "CAP",
+                SCHEMA_VERSION,
+                &[
+                    &ctx.file.relative_path,
+                    target_function_id,
+                    scope_id,
+                    name,
+                    mode,
+                    &location,
+                ],
+            ),
+            source_scope_id: scope_id.clone(),
+            target_function_id: target_function_id.to_string(),
+            place: place.clone(),
+            mode: mode.to_string(),
+            span: self.span(ctx.file, ctx.source, node),
+        });
     }
 
     fn use_place_for_node(&self, ctx: &LoweringContext<'_>, node: Node<'_>) -> Option<Place> {

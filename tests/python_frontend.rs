@@ -243,3 +243,87 @@ def outer():
             )
     }));
 }
+
+#[test]
+fn python_frontend_records_captures_params_and_bases() {
+    let cache = parse_python(
+        r#"
+class Child(Base):
+    def outer(self, value):
+        total = value
+
+        def inner(delta):
+            nonlocal total
+            total = total + delta
+            return total
+
+        return inner
+"#,
+    );
+
+    let child = cache
+        .classes
+        .iter()
+        .find(|class| class.qualified_name == "Child")
+        .unwrap();
+    let outer = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "Child.outer")
+        .unwrap();
+    let inner = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "Child.outer.inner")
+        .unwrap();
+    let inner_scope = cache
+        .scopes
+        .iter()
+        .find(|scope| scope.scope_id == inner.scope_id)
+        .unwrap();
+
+    assert_eq!(child.base_exprs, vec!["Base".to_string()]);
+    assert_eq!(outer.class_id.as_deref(), Some(child.class_id.as_str()));
+    assert_eq!(inner.class_id, None);
+    assert_eq!(inner_scope.parent_scope_id.as_deref(), Some(outer.scope_id.as_str()));
+
+    assert!(cache.definitions.iter().any(|definition| {
+        definition.function_id.as_deref() == Some(outer.function_id.as_str())
+            && definition.def_kind == "param"
+            && matches!(
+                &definition.place,
+                Place::Local { scope_id, name }
+                    if scope_id == &outer.scope_id && name == "value"
+            )
+    }));
+
+    assert!(cache.definitions.iter().any(|definition| {
+        definition.function_id.as_deref() == Some(inner.function_id.as_str())
+            && definition.def_kind == "param"
+            && matches!(
+                &definition.place,
+                Place::Local { scope_id, name }
+                    if scope_id == &inner.scope_id && name == "delta"
+            )
+    }));
+
+    assert!(cache.captures.iter().any(|capture| {
+        capture.target_function_id == inner.function_id
+            && capture.mode == "read"
+            && matches!(
+                &capture.place,
+                Place::Closure { scope_id, name }
+                    if scope_id == &outer.scope_id && name == "total"
+            )
+    }));
+
+    assert!(cache.captures.iter().any(|capture| {
+        capture.target_function_id == inner.function_id
+            && capture.mode == "write"
+            && matches!(
+                &capture.place,
+                Place::Closure { scope_id, name }
+                    if scope_id == &outer.scope_id && name == "total"
+            )
+    }));
+}
