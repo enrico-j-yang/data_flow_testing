@@ -6,8 +6,9 @@ use crate::ir::{
     ScopeRecord, SourceFileRecord, Use, SCHEMA_VERSION,
 };
 use crate::source::SourceSpan;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use tree_sitter::{Node, Parser};
 
@@ -80,6 +81,7 @@ impl PythonFrontend {
             module_id,
             module_scope_id,
             module_index,
+            module_bindings: collect_scope_declarations(self, source, root).bindings,
             class_stack: Vec::new(),
             function_stack: Vec::new(),
         };
@@ -92,6 +94,9 @@ impl PythonFrontend {
 
     fn walk(&self, cache: &mut AnalysisCache, ctx: &mut LoweringContext<'_>, node: Node<'_>) {
         match node.kind() {
+            "future_import_statement" | "import_statement" => {
+                self.lower_import_statement(cache, ctx, node)
+            }
             "import_from_statement" => self.lower_import_from(cache, ctx, node),
             "class_definition" => self.lower_class(cache, ctx, node),
             "function_definition" => self.lower_function(cache, ctx, node),
@@ -111,6 +116,71 @@ impl PythonFrontend {
             .unwrap_or_default()
             .trim()
             .to_string()
+    }
+
+    fn push_import(
+        &self,
+        cache: &mut AnalysisCache,
+        ctx: &LoweringContext<'_>,
+        node: Node<'_>,
+        module: String,
+        name: Option<String>,
+        alias: Option<String>,
+        level: usize,
+    ) {
+        let label = format!(
+            "{}:{}",
+            node.start_position().row + 1,
+            node.start_position().column + 1
+        );
+        let import_name = name.as_deref().unwrap_or("_");
+        let import_alias = alias.as_deref().unwrap_or("_");
+
+        cache.modules[ctx.module_index].imports.push(ImportRecord {
+            import_id: stable_id(
+                "I",
+                SCHEMA_VERSION,
+                &[
+                    &ctx.file.relative_path,
+                    &module,
+                    import_name,
+                    import_alias,
+                    &label,
+                ],
+            ),
+            module,
+            name,
+            alias,
+            level,
+            resolution: "parsed".to_string(),
+            span: self.span(ctx.file, ctx.source, node),
+        });
+    }
+
+    fn lower_import_statement(
+        &self,
+        cache: &mut AnalysisCache,
+        ctx: &mut LoweringContext<'_>,
+        node: Node<'_>,
+    ) {
+        let mut cursor = node.walk();
+        for import_node in node.children_by_field_name("name", &mut cursor) {
+            let (module, alias) = if import_node.kind() == "aliased_import" {
+                (
+                    import_node
+                        .child_by_field_name("name")
+                        .map(|value| self.node_text(ctx.source, value))
+                        .unwrap_or_default(),
+                    import_node
+                        .child_by_field_name("alias")
+                        .map(|value| self.node_text(ctx.source, value)),
+                )
+            } else {
+                (self.node_text(ctx.source, import_node), None)
+            };
+
+            self.push_import(cache, ctx, import_node, module, None, alias, 0);
+        }
     }
 
     fn lower_import_from(
@@ -140,33 +210,16 @@ impl PythonFrontend {
             } else {
                 (Some(self.node_text(ctx.source, import_node)), None)
             };
-            let label = format!(
-                "{}:{}",
-                import_node.start_position().row + 1,
-                import_node.start_position().column + 1
-            );
-            let import_name = name.as_deref().unwrap_or("*");
-            let import_alias = alias.as_deref().unwrap_or("_");
 
-            cache.modules[ctx.module_index].imports.push(ImportRecord {
-                import_id: stable_id(
-                    "I",
-                    SCHEMA_VERSION,
-                    &[
-                        &ctx.file.relative_path,
-                        &normalized_module,
-                        import_name,
-                        import_alias,
-                        &label,
-                    ],
-                ),
-                module: normalized_module.clone(),
+            self.push_import(
+                cache,
+                ctx,
+                import_node,
+                normalized_module.clone(),
                 name,
                 alias,
                 level,
-                resolution: "parsed".to_string(),
-                span: self.span(ctx.file, ctx.source, import_node),
-            });
+            );
         }
     }
 
@@ -182,6 +235,8 @@ impl PythonFrontend {
         let class_name = self.node_text(ctx.source, name_node);
         let qualified_name = if let Some(parent) = ctx.class_stack.last() {
             format!("{}.{}", parent.qualified_name, class_name)
+        } else if let Some(function_frame) = ctx.function_stack.last() {
+            format!("{}.{}", function_frame.qualified_name, class_name)
         } else {
             class_name.clone()
         };
@@ -190,7 +245,11 @@ impl PythonFrontend {
             node.start_position().row + 1,
             node.start_position().column + 1
         );
-        let class_id = stable_id("C", SCHEMA_VERSION, &[&ctx.file.relative_path, &qualified_name, &start]);
+        let class_id = stable_id(
+            "C",
+            SCHEMA_VERSION,
+            &[&ctx.file.relative_path, &qualified_name, &start],
+        );
         let scope_id = stable_id("S", SCHEMA_VERSION, &[&class_id, "class"]);
         let base_exprs = node
             .child_by_field_name("superclasses")
@@ -201,6 +260,10 @@ impl PythonFrontend {
                     .map(|child| self.node_text(ctx.source, child))
                     .collect::<Vec<_>>()
             })
+            .unwrap_or_default();
+        let bindings = node
+            .child_by_field_name("body")
+            .map(|body| collect_scope_declarations(self, ctx.source, body).bindings)
             .unwrap_or_default();
 
         let class_index = cache.classes.len();
@@ -227,6 +290,7 @@ impl PythonFrontend {
             qualified_name,
             scope_id,
             cache_index: class_index,
+            bindings,
         });
 
         if let Some(body) = node.child_by_field_name("body") {
@@ -249,14 +313,16 @@ impl PythonFrontend {
             return;
         };
         let function_name = self.node_text(ctx.source, name_node);
-        let qualified_name = if let Some(class_frame) = ctx.class_stack.last() {
-            format!("{}.{}", class_frame.qualified_name, function_name)
-        } else if let Some(function_frame) = ctx.function_stack.last() {
+        let qualified_name = if let Some(function_frame) = ctx.function_stack.last() {
             format!("{}.{}", function_frame.qualified_name, function_name)
+        } else if let Some(class_frame) = ctx.class_stack.last() {
+            format!("{}.{}", class_frame.qualified_name, function_name)
         } else {
             function_name.clone()
         };
-        let kind = if ctx.class_stack.last().is_some() {
+        let kind = if ctx.function_stack.last().is_some() {
+            "function"
+        } else if ctx.class_stack.last().is_some() {
             "method"
         } else {
             "function"
@@ -274,13 +340,24 @@ impl PythonFrontend {
         let scope_id = stable_id("S", SCHEMA_VERSION, &[&function_id, "function"]);
         let params = node
             .child_by_field_name("parameters")
-            .map(|parameters| collect_identifiers(self, ctx.source, parameters))
+            .map(|parameters| collect_parameter_bindings(self, ctx.source, parameters))
             .unwrap_or_default();
+        let declarations = node
+            .child_by_field_name("body")
+            .map(|body| collect_scope_declarations(self, ctx.source, body))
+            .unwrap_or_default();
+        let mut bindings = declarations.bindings.clone();
+        bindings.extend(params.iter().cloned());
+        let direct_class_owner = if ctx.function_stack.is_empty() {
+            ctx.class_stack.last().map(|frame| frame.class_id.clone())
+        } else {
+            None
+        };
 
         cache.functions.push(FunctionRecord {
             function_id: function_id.clone(),
             module_id: ctx.module_id.clone(),
-            class_id: ctx.class_stack.last().map(|frame| frame.class_id.clone()),
+            class_id: direct_class_owner.clone(),
             qualified_name: qualified_name.clone(),
             kind: kind.to_string(),
             params,
@@ -295,16 +372,21 @@ impl PythonFrontend {
             span: self.span(ctx.file, ctx.source, node),
         });
 
-        if let Some(class_frame) = ctx.class_stack.last() {
-            cache.classes[class_frame.cache_index]
-                .methods
-                .push(function_id.clone());
+        if ctx.function_stack.is_empty() {
+            if let Some(class_frame) = ctx.class_stack.last() {
+                cache.classes[class_frame.cache_index]
+                    .methods
+                    .push(function_id.clone());
+            }
         }
 
         ctx.function_stack.push(FunctionFrame {
             function_id,
             qualified_name,
             scope_id,
+            bindings,
+            global_decls: declarations.global_decls,
+            nonlocal_decls: declarations.nonlocal_decls,
         });
 
         if let Some(body) = node.child_by_field_name("body") {
@@ -323,11 +405,12 @@ impl PythonFrontend {
         ctx: &mut LoweringContext<'_>,
         node: Node<'_>,
     ) {
-        let Some(left) = node.child_by_field_name("left") else {
+        let mut targets = Vec::new();
+        let right = collect_assignment_targets(node, &mut targets);
+        if targets.is_empty() {
             return;
-        };
-        let place = self.place_for_node(ctx, left);
-        let right = node.child_by_field_name("right");
+        }
+
         let expr = right
             .map(|value| self.node_text(ctx.source, value))
             .unwrap_or_default();
@@ -341,25 +424,35 @@ impl PythonFrontend {
             }
         }
 
-        let location = format!(
-            "{}:{}",
-            node.start_position().row + 1,
-            node.start_position().column + 1
-        );
-        cache.definitions.push(Definition {
-            def_id: stable_id(
-                "D",
-                SCHEMA_VERSION,
-                &[&ctx.file.relative_path, &self.node_text(ctx.source, left), &location],
-            ),
-            place,
-            def_kind: "assign".to_string(),
-            scope_id: ctx.current_scope_id().to_string(),
-            function_id: ctx.current_function_id().map(str::to_string),
-            span: self.span(ctx.file, ctx.source, node),
-            expr,
-            deps,
-        });
+        for target in targets {
+            let Some(place) = self.target_place_for_node(ctx, target) else {
+                continue;
+            };
+            let location = format!(
+                "{}:{}",
+                target.start_position().row + 1,
+                target.start_position().column + 1
+            );
+
+            cache.definitions.push(Definition {
+                def_id: stable_id(
+                    "D",
+                    SCHEMA_VERSION,
+                    &[
+                        &ctx.file.relative_path,
+                        &self.node_text(ctx.source, target),
+                        &location,
+                    ],
+                ),
+                place,
+                def_kind: "assign".to_string(),
+                scope_id: ctx.current_scope_id().to_string(),
+                function_id: ctx.current_function_id().map(str::to_string),
+                span: self.span(ctx.file, ctx.source, node),
+                expr: expr.clone(),
+                deps: deps.clone(),
+            });
+        }
     }
 
     fn lower_return(
@@ -383,11 +476,7 @@ impl PythonFrontend {
         node: Node<'_>,
         context: &str,
     ) -> Option<Place> {
-        if !matches!(node.kind(), "identifier" | "attribute") {
-            return None;
-        }
-
-        let place = self.place_for_node(ctx, node);
+        let place = self.use_place_for_node(ctx, node)?;
         let location = format!(
             "{}:{}",
             node.start_position().row + 1,
@@ -411,37 +500,137 @@ impl PythonFrontend {
         Some(place)
     }
 
-    fn place_for_node(&self, ctx: &LoweringContext<'_>, node: Node<'_>) -> Place {
+    fn use_place_for_node(&self, ctx: &LoweringContext<'_>, node: Node<'_>) -> Option<Place> {
         match node.kind() {
             "identifier" => {
-                let name = self.node_text(ctx.source, node);
-                if ctx.function_stack.last().is_some() || ctx.class_stack.last().is_some() {
-                    Place::Local {
-                        scope_id: ctx.current_scope_id().to_string(),
-                        name,
-                    }
-                } else {
-                    Place::Global {
+                Some(self.resolve_identifier_use_place(ctx, &self.node_text(ctx.source, node)))
+            }
+            "attribute" => Some(self.attribute_place(ctx, node)),
+            _ => None,
+        }
+    }
+
+    fn target_place_for_node(&self, ctx: &LoweringContext<'_>, node: Node<'_>) -> Option<Place> {
+        match node.kind() {
+            "identifier" => {
+                Some(self.target_identifier_place(ctx, &self.node_text(ctx.source, node)))
+            }
+            "attribute" => Some(self.attribute_place(ctx, node)),
+            _ => None,
+        }
+    }
+
+    fn resolve_identifier_use_place(&self, ctx: &LoweringContext<'_>, name: &str) -> Place {
+        if !ctx.function_stack.is_empty() {
+            for (index, frame) in ctx.function_stack.iter().enumerate().rev() {
+                if frame.global_decls.contains(name) {
+                    return Place::Global {
                         module_id: ctx.module_id.clone(),
-                        name,
-                    }
+                        name: name.to_string(),
+                    };
+                }
+                if frame.bindings.contains(name) {
+                    return if index == ctx.function_stack.len() - 1 {
+                        Place::Local {
+                            scope_id: frame.scope_id.clone(),
+                            name: name.to_string(),
+                        }
+                    } else {
+                        Place::Closure {
+                            scope_id: frame.scope_id.clone(),
+                            name: name.to_string(),
+                        }
+                    };
+                }
+                if frame.nonlocal_decls.contains(name) {
+                    continue;
                 }
             }
-            "attribute" => {
-                let base = node
-                    .child_by_field_name("object")
-                    .map(|value| self.node_text(ctx.source, value))
-                    .unwrap_or_default();
-                let attr = node
-                    .child_by_field_name("attribute")
-                    .map(|value| self.node_text(ctx.source, value))
-                    .unwrap_or_default();
-                Place::Attribute { base, attr }
+
+            if ctx.module_bindings.contains(name) {
+                return Place::Global {
+                    module_id: ctx.module_id.clone(),
+                    name: name.to_string(),
+                };
             }
-            _ => Place::Unknown {
-                reason: self.node_text(ctx.source, node),
-            },
+
+            return Place::External {
+                name: name.to_string(),
+            };
         }
+
+        if !ctx.class_stack.is_empty() {
+            for frame in ctx.class_stack.iter().rev() {
+                if frame.bindings.contains(name) {
+                    return Place::Local {
+                        scope_id: frame.scope_id.clone(),
+                        name: name.to_string(),
+                    };
+                }
+            }
+
+            if ctx.module_bindings.contains(name) {
+                return Place::Global {
+                    module_id: ctx.module_id.clone(),
+                    name: name.to_string(),
+                };
+            }
+
+            return Place::External {
+                name: name.to_string(),
+            };
+        }
+
+        if ctx.module_bindings.contains(name) {
+            Place::Global {
+                module_id: ctx.module_id.clone(),
+                name: name.to_string(),
+            }
+        } else {
+            Place::External {
+                name: name.to_string(),
+            }
+        }
+    }
+
+    fn target_identifier_place(&self, ctx: &LoweringContext<'_>, name: &str) -> Place {
+        if let Some(function_frame) = ctx.function_stack.last() {
+            if function_frame.global_decls.contains(name) {
+                return Place::Global {
+                    module_id: ctx.module_id.clone(),
+                    name: name.to_string(),
+                };
+            }
+
+            return Place::Local {
+                scope_id: function_frame.scope_id.clone(),
+                name: name.to_string(),
+            };
+        }
+
+        if let Some(class_frame) = ctx.class_stack.last() {
+            return Place::Local {
+                scope_id: class_frame.scope_id.clone(),
+                name: name.to_string(),
+            };
+        }
+
+        Place::Global {
+            module_id: ctx.module_id.clone(),
+            name: name.to_string(),
+        }
+    }
+
+    fn attribute_place(&self, ctx: &LoweringContext<'_>, node: Node<'_>) -> Place {
+        let base = node
+            .child_by_field_name("object")
+            .map(|value| self.node_text(ctx.source, value))
+            .unwrap_or_default();
+        let attr = node
+            .child_by_field_name("attribute")
+            .map(|value| self.node_text(ctx.source, value))
+            .unwrap_or_default();
+        Place::Attribute { base, attr }
     }
 }
 
@@ -460,9 +649,12 @@ impl LanguageFrontend for PythonFrontend {
         for file in files {
             let source = fs::read_to_string(&file.absolute_path)
                 .with_context(|| format!("failed to read {}", file.absolute_path.display()))?;
-            let tree = parser
-                .parse(&source, None)
-                .ok_or_else(|| anyhow!("tree-sitter returned no parse tree for {}", file.relative_path))?;
+            let tree = parser.parse(&source, None).ok_or_else(|| {
+                anyhow!(
+                    "tree-sitter returned no parse tree for {}",
+                    file.relative_path
+                )
+            })?;
             self.lower_module(&mut cache, file, &source, tree.root_node());
         }
 
@@ -476,6 +668,7 @@ struct LoweringContext<'a> {
     module_id: String,
     module_scope_id: String,
     module_index: usize,
+    module_bindings: HashSet<String>,
     class_stack: Vec<ClassFrame>,
     function_stack: Vec<FunctionFrame>,
 }
@@ -492,7 +685,9 @@ impl LoweringContext<'_> {
     }
 
     fn current_function_id(&self) -> Option<&str> {
-        self.function_stack.last().map(|frame| frame.function_id.as_str())
+        self.function_stack
+            .last()
+            .map(|frame| frame.function_id.as_str())
     }
 }
 
@@ -501,12 +696,23 @@ struct ClassFrame {
     qualified_name: String,
     scope_id: String,
     cache_index: usize,
+    bindings: HashSet<String>,
 }
 
 struct FunctionFrame {
     function_id: String,
     qualified_name: String,
     scope_id: String,
+    bindings: HashSet<String>,
+    global_decls: HashSet<String>,
+    nonlocal_decls: HashSet<String>,
+}
+
+#[derive(Default)]
+struct ScopeDeclarations {
+    bindings: HashSet<String>,
+    global_decls: HashSet<String>,
+    nonlocal_decls: HashSet<String>,
 }
 
 fn source_hash(source: &str) -> String {
@@ -515,26 +721,215 @@ fn source_hash(source: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn collect_identifiers(frontend: &PythonFrontend, source: &str, node: Node<'_>) -> Vec<String> {
-    let mut identifiers = Vec::new();
-    collect_identifiers_inner(frontend, source, node, &mut identifiers);
-    identifiers
-}
-
-fn collect_identifiers_inner(
+fn collect_scope_declarations(
     frontend: &PythonFrontend,
     source: &str,
     node: Node<'_>,
-    identifiers: &mut Vec<String>,
-) {
-    if node.kind() == "identifier" {
-        identifiers.push(frontend.node_text(source, node));
-        return;
-    }
+) -> ScopeDeclarations {
+    let mut declarations = ScopeDeclarations::default();
+    scan_scope_declarations(frontend, source, node, &mut declarations);
+    declarations
+}
 
+fn scan_scope_declarations(
+    frontend: &PythonFrontend,
+    source: &str,
+    node: Node<'_>,
+    declarations: &mut ScopeDeclarations,
+) {
+    match node.kind() {
+        "function_definition" | "class_definition" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                declarations
+                    .bindings
+                    .insert(frontend.node_text(source, name_node));
+            }
+        }
+        "future_import_statement" | "import_statement" => {
+            collect_plain_import_bindings(frontend, source, node, &mut declarations.bindings)
+        }
+        "import_from_statement" => {
+            collect_from_import_bindings(frontend, source, node, &mut declarations.bindings)
+        }
+        "assignment" => {
+            collect_assignment_binding_names(frontend, source, node, &mut declarations.bindings)
+        }
+        "global_statement" => {
+            collect_statement_identifiers(frontend, source, node, &mut declarations.global_decls)
+        }
+        "nonlocal_statement" => {
+            collect_statement_identifiers(frontend, source, node, &mut declarations.nonlocal_decls)
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                scan_scope_declarations(frontend, source, child, declarations);
+            }
+        }
+    }
+}
+
+fn collect_plain_import_bindings(
+    frontend: &PythonFrontend,
+    source: &str,
+    node: Node<'_>,
+    bindings: &mut HashSet<String>,
+) {
+    let mut cursor = node.walk();
+    for import_node in node.children_by_field_name("name", &mut cursor) {
+        if import_node.kind() == "aliased_import" {
+            if let Some(alias_node) = import_node.child_by_field_name("alias") {
+                bindings.insert(frontend.node_text(source, alias_node));
+            }
+            continue;
+        }
+
+        let module = frontend.node_text(source, import_node);
+        if let Some(root) = module.split('.').next() {
+            bindings.insert(root.to_string());
+        }
+    }
+}
+
+fn collect_from_import_bindings(
+    frontend: &PythonFrontend,
+    source: &str,
+    node: Node<'_>,
+    bindings: &mut HashSet<String>,
+) {
+    let mut cursor = node.walk();
+    for import_node in node.children_by_field_name("name", &mut cursor) {
+        if import_node.kind() == "aliased_import" {
+            if let Some(alias_node) = import_node.child_by_field_name("alias") {
+                bindings.insert(frontend.node_text(source, alias_node));
+            }
+            continue;
+        }
+
+        let imported_name = frontend.node_text(source, import_node);
+        if let Some(name) = imported_name.rsplit('.').next() {
+            bindings.insert(name.to_string());
+        }
+    }
+}
+
+fn collect_assignment_binding_names(
+    frontend: &PythonFrontend,
+    source: &str,
+    node: Node<'_>,
+    bindings: &mut HashSet<String>,
+) {
+    let mut targets = Vec::new();
+    collect_assignment_targets(node, &mut targets);
+    for target in targets {
+        if target.kind() == "identifier" {
+            bindings.insert(frontend.node_text(source, target));
+        }
+    }
+}
+
+fn collect_statement_identifiers(
+    frontend: &PythonFrontend,
+    source: &str,
+    node: Node<'_>,
+    bindings: &mut HashSet<String>,
+) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_identifiers_inner(frontend, source, child, identifiers);
+        if child.kind() == "identifier" {
+            bindings.insert(frontend.node_text(source, child));
+        }
+    }
+}
+
+fn collect_parameter_bindings(
+    frontend: &PythonFrontend,
+    source: &str,
+    parameters: Node<'_>,
+) -> Vec<String> {
+    let mut bindings = Vec::new();
+    let mut cursor = parameters.walk();
+    for child in parameters.named_children(&mut cursor) {
+        collect_parameter_binding_nodes(frontend, source, child, &mut bindings);
+    }
+    bindings
+}
+
+fn collect_parameter_binding_nodes(
+    frontend: &PythonFrontend,
+    source: &str,
+    node: Node<'_>,
+    bindings: &mut Vec<String>,
+) {
+    match node.kind() {
+        "identifier" => bindings.push(frontend.node_text(source, node)),
+        "parameter" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect_parameter_binding_nodes(frontend, source, child, bindings);
+            }
+        }
+        "default_parameter" | "typed_default_parameter" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                collect_parameter_binding_nodes(frontend, source, name_node, bindings);
+            }
+        }
+        "typed_parameter" => {
+            let type_node = node.child_by_field_name("type");
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if type_node.map(|value| value == child).unwrap_or(false) {
+                    continue;
+                }
+                collect_parameter_binding_nodes(frontend, source, child, bindings);
+            }
+        }
+        "tuple_pattern" | "list_pattern" | "list_splat_pattern" | "dictionary_splat_pattern" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect_parameter_binding_nodes(frontend, source, child, bindings);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_assignment_targets<'tree>(
+    node: Node<'tree>,
+    targets: &mut Vec<Node<'tree>>,
+) -> Option<Node<'tree>> {
+    if let Some(left) = node.child_by_field_name("left") {
+        collect_binding_target_nodes(left, targets);
+    }
+
+    let right = node.child_by_field_name("right")?;
+    if right.kind() == "assignment" {
+        collect_assignment_targets(right, targets)
+    } else {
+        Some(right)
+    }
+}
+
+fn collect_binding_target_nodes<'tree>(node: Node<'tree>, targets: &mut Vec<Node<'tree>>) {
+    match node.kind() {
+        "identifier" | "attribute" => targets.push(node),
+        "pattern_list"
+        | "tuple_pattern"
+        | "list_pattern"
+        | "list_splat_pattern"
+        | "dictionary_splat_pattern"
+        | "parenthesized_expression" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect_binding_target_nodes(child, targets);
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect_binding_target_nodes(child, targets);
+            }
+        }
     }
 }
 
