@@ -32,6 +32,13 @@ mod tests {
     }
 
     #[test]
+    fn stable_ids_change_when_schema_version_changes() {
+        let v1 = stable_id("D", 1, &["app/main.py", "x", "1:0"]);
+        let v2 = stable_id("D", 2, &["app/main.py", "x", "1:0"]);
+        assert_ne!(v1, v2);
+    }
+
+    #[test]
     fn safe_slug_replaces_dot_unsafe_characters() {
         assert_eq!(
             safe_slug("app/routers/tests.py::create-test"),
