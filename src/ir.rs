@@ -1,7 +1,7 @@
 use crate::source::SourceSpan;
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Place {
@@ -251,6 +251,7 @@ mod tests {
 
     #[test]
     fn analysis_cache_default_uses_current_schema_version() {
+        assert_eq!(SCHEMA_VERSION, 2);
         assert_eq!(AnalysisCache::default().schema_version, SCHEMA_VERSION);
     }
 
@@ -382,6 +383,9 @@ mod tests {
 
     #[test]
     fn cache_round_trips_rich_ir() {
+        let module_span = SourceSpan::synthetic("app/a.py", "import math");
+        let function_span = SourceSpan::synthetic("app/a.py", "def foo(value): return value");
+        let call_span = SourceSpan::synthetic("app/a.py", "print(value)");
         let cache = AnalysisCache {
             schema_version: SCHEMA_VERSION,
             tool_version: "0.1.0".to_string(),
@@ -397,38 +401,210 @@ mod tests {
                 file_id: "M_a".to_string(),
                 module_name: "app.a".to_string(),
                 exports: vec!["foo".to_string()],
-                imports: Vec::new(),
+                imports: vec![ImportRecord {
+                    import_id: "I_math".to_string(),
+                    module: "math".to_string(),
+                    name: Some("sqrt".to_string()),
+                    alias: Some("sq".to_string()),
+                    level: 0,
+                    resolution: "resolved".to_string(),
+                    span: module_span.clone(),
+                }],
             }],
-            scopes: Vec::new(),
-            classes: Vec::new(),
-            functions: Vec::new(),
+            scopes: vec![
+                ScopeRecord {
+                    scope_id: "S_module".to_string(),
+                    scope_kind: "module".to_string(),
+                    parent_scope_id: None,
+                    owner_id: "M_a".to_string(),
+                    span: module_span.clone(),
+                },
+                ScopeRecord {
+                    scope_id: "S_fn".to_string(),
+                    scope_kind: "function".to_string(),
+                    parent_scope_id: Some("S_module".to_string()),
+                    owner_id: "FN_foo".to_string(),
+                    span: function_span.clone(),
+                },
+            ],
+            classes: vec![ClassRecord {
+                class_id: "C_box".to_string(),
+                module_id: "M_a".to_string(),
+                qualified_name: "app.a.Box".to_string(),
+                base_exprs: vec!["Base".to_string()],
+                resolved_bases: vec!["app.base.Base".to_string()],
+                mro_status: "resolved".to_string(),
+                methods: vec!["FN_foo".to_string()],
+                span: function_span.clone(),
+            }],
+            functions: vec![FunctionRecord {
+                function_id: "FN_foo".to_string(),
+                module_id: "M_a".to_string(),
+                class_id: Some("C_box".to_string()),
+                qualified_name: "app.a.Box.foo".to_string(),
+                kind: "method".to_string(),
+                params: vec!["self".to_string(), "value".to_string()],
+                scope_id: "S_fn".to_string(),
+                span: function_span.clone(),
+            }],
             definitions: vec![Definition {
                 def_id: "D_x".to_string(),
                 place: Place::Local {
-                    scope_id: "S_a".to_string(),
+                    scope_id: "S_fn".to_string(),
                     name: "x".to_string(),
                 },
                 def_kind: "assign".to_string(),
-                scope_id: "S_a".to_string(),
-                function_id: None,
-                span: SourceSpan::synthetic("app/a.py", "x = 1"),
-                expr: "1".to_string(),
-                deps: Vec::new(),
+                scope_id: "S_fn".to_string(),
+                function_id: Some("FN_foo".to_string()),
+                span: function_span.clone(),
+                expr: "value".to_string(),
+                deps: vec![Place::Local {
+                    scope_id: "S_fn".to_string(),
+                    name: "value".to_string(),
+                }],
             }],
-            uses: Vec::new(),
-            captures: Vec::new(),
-            calls: Vec::new(),
-            cfgs: Vec::new(),
-            def_use_edges: Vec::new(),
-            var_dependency_edges: Vec::new(),
-            function_summaries: Vec::new(),
-            diagnostics: Vec::new(),
-            graph_index: Vec::new(),
+            uses: vec![Use {
+                use_id: "U_value".to_string(),
+                place: Place::Local {
+                    scope_id: "S_fn".to_string(),
+                    name: "value".to_string(),
+                },
+                use_kind: "load".to_string(),
+                scope_id: "S_fn".to_string(),
+                function_id: Some("FN_foo".to_string()),
+                span: function_span.clone(),
+                context: "rhs".to_string(),
+            }],
+            captures: vec![CaptureRecord {
+                capture_id: "CAP_x".to_string(),
+                source_scope_id: "S_module".to_string(),
+                target_function_id: "FN_foo".to_string(),
+                place: Place::Global {
+                    module_id: "M_a".to_string(),
+                    name: "x".to_string(),
+                },
+                mode: "read".to_string(),
+                span: function_span.clone(),
+            }],
+            calls: vec![CallRecord {
+                call_id: "CALL_print".to_string(),
+                function_id: Some("FN_foo".to_string()),
+                callee_expr: "print".to_string(),
+                candidate_function_ids: vec!["FN_builtin_print".to_string()],
+                resolution: "builtin".to_string(),
+                arg_use_ids: vec!["U_value".to_string()],
+                return_target_def_id: Some("D_x".to_string()),
+                span: call_span.clone(),
+            }],
+            cfgs: vec![CfgRecord {
+                function_id: "FN_foo".to_string(),
+                blocks: vec![
+                    CfgBlock {
+                        block_id: "B_entry".to_string(),
+                        block_kind: "entry".to_string(),
+                        statements: vec!["x = value".to_string()],
+                        span: function_span.clone(),
+                    },
+                    CfgBlock {
+                        block_id: "B_exit".to_string(),
+                        block_kind: "exit".to_string(),
+                        statements: vec!["return x".to_string()],
+                        span: function_span.clone(),
+                    },
+                ],
+                edges: vec![CfgEdge {
+                    edge_id: "E_next".to_string(),
+                    from_block_id: "B_entry".to_string(),
+                    to_block_id: "B_exit".to_string(),
+                    edge_kind: "fallthrough".to_string(),
+                    label: "next".to_string(),
+                }],
+                entry_block_id: "B_entry".to_string(),
+                exit_block_id: "B_exit".to_string(),
+            }],
+            def_use_edges: vec![DefUseEdge {
+                edge_id: "DU_1".to_string(),
+                def_id: "D_x".to_string(),
+                use_id: "U_value".to_string(),
+                place: Place::Local {
+                    scope_id: "S_fn".to_string(),
+                    name: "x".to_string(),
+                },
+                edge_kind: "direct".to_string(),
+                path_summary: "B_entry -> B_exit".to_string(),
+            }],
+            var_dependency_edges: vec![VarDependencyEdge {
+                edge_id: "VD_1".to_string(),
+                source_place: Place::Local {
+                    scope_id: "S_fn".to_string(),
+                    name: "value".to_string(),
+                },
+                target_place: Place::Local {
+                    scope_id: "S_fn".to_string(),
+                    name: "x".to_string(),
+                },
+                source_id: "U_value".to_string(),
+                target_id: "D_x".to_string(),
+                dep_kind: "data".to_string(),
+                span: function_span.clone(),
+            }],
+            function_summaries: vec![FunctionSummary {
+                function_id: "FN_foo".to_string(),
+                inputs: vec![Place::Local {
+                    scope_id: "S_fn".to_string(),
+                    name: "value".to_string(),
+                }],
+                returns: vec![Place::Local {
+                    scope_id: "S_fn".to_string(),
+                    name: "x".to_string(),
+                }],
+                yields: Vec::new(),
+                writes: vec![Place::Attribute {
+                    base: "self".to_string(),
+                    attr: "value".to_string(),
+                }],
+                raises: vec![Place::External {
+                    name: "ValueError".to_string(),
+                }],
+                external_effects: vec!["prints".to_string()],
+                fixpoint_status: "stable".to_string(),
+            }],
+            diagnostics: vec![Diagnostic {
+                diagnostic_id: "G_import".to_string(),
+                severity: "warning".to_string(),
+                kind: "import".to_string(),
+                message: "using builtin resolution".to_string(),
+                file: "app/a.py".to_string(),
+                span: module_span.clone(),
+            }],
+            graph_index: vec![GraphRecord {
+                graph_id: "CFG_FN_foo".to_string(),
+                kind: "cfg".to_string(),
+                dot_path: "graphs/foo.dot".to_string(),
+                svg_path: Some("graphs/foo.svg".to_string()),
+                html_path: Some("graphs/foo.html".to_string()),
+            }],
         };
 
         let json = serde_json::to_string(&cache).unwrap();
         let decoded: AnalysisCache = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.schema_version, SCHEMA_VERSION);
+        assert_eq!(decoded.schema_version, 2);
+        assert_eq!(decoded.modules[0].imports[0].alias.as_deref(), Some("sq"));
+        assert_eq!(decoded.scopes[1].parent_scope_id.as_deref(), Some("S_module"));
+        assert_eq!(decoded.classes[0].resolved_bases, vec!["app.base.Base".to_string()]);
+        assert_eq!(decoded.functions[0].class_id.as_deref(), Some("C_box"));
         assert_eq!(decoded.definitions[0].def_kind, "assign");
+        assert_eq!(decoded.uses[0].context, "rhs");
+        assert_eq!(decoded.captures[0].mode, "read");
+        assert_eq!(decoded.calls[0].arg_use_ids, vec!["U_value".to_string()]);
+        assert_eq!(decoded.cfgs[0].edges[0].label, "next");
+        assert_eq!(decoded.def_use_edges[0].path_summary, "B_entry -> B_exit");
+        assert_eq!(decoded.var_dependency_edges[0].dep_kind, "data");
+        assert_eq!(
+            decoded.function_summaries[0].external_effects,
+            vec!["prints".to_string()]
+        );
+        assert_eq!(decoded.diagnostics[0].kind, "import");
+        assert_eq!(decoded.graph_index[0].svg_path.as_deref(), Some("graphs/foo.svg"));
     }
 }
