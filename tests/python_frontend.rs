@@ -197,3 +197,49 @@ class Child:
             )
     }));
 }
+
+#[test]
+fn python_frontend_lowers_nonlocal_rebinding_as_closure_access() {
+    let cache = parse_python(
+        r#"
+def outer():
+    x = 0
+
+    def inner():
+        nonlocal x
+        x = x + 1
+        return x
+"#,
+    );
+
+    let outer = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "outer")
+        .unwrap();
+    let inner = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "outer.inner")
+        .unwrap();
+
+    assert!(cache.definitions.iter().any(|definition| {
+        definition.function_id.as_deref() == Some(inner.function_id.as_str())
+            && definition.expr == "x + 1"
+            && matches!(
+                &definition.place,
+                Place::Closure { scope_id, name }
+                    if scope_id == &outer.scope_id && name == "x"
+            )
+    }));
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(inner.function_id.as_str())
+            && use_record.context == "assign:rhs"
+            && matches!(
+                &use_record.place,
+                Place::Closure { scope_id, name }
+                    if scope_id == &outer.scope_id && name == "x"
+            )
+    }));
+}

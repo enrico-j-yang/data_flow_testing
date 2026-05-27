@@ -522,12 +522,24 @@ impl PythonFrontend {
 
     fn resolve_identifier_use_place(&self, ctx: &LoweringContext<'_>, name: &str) -> Place {
         if !ctx.function_stack.is_empty() {
+            let current_frame = ctx.function_stack.last().unwrap();
+            if current_frame.global_decls.contains(name) {
+                return Place::Global {
+                    module_id: ctx.module_id.clone(),
+                    name: name.to_string(),
+                };
+            }
+            if current_frame.nonlocal_decls.contains(name) {
+                if let Some(place) = self.resolve_enclosing_function_place(ctx, name) {
+                    return place;
+                }
+            }
+
             for (index, frame) in ctx.function_stack.iter().enumerate().rev() {
-                if frame.global_decls.contains(name) {
-                    return Place::Global {
-                        module_id: ctx.module_id.clone(),
-                        name: name.to_string(),
-                    };
+                if index == ctx.function_stack.len() - 1
+                    && current_frame.nonlocal_decls.contains(name)
+                {
+                    continue;
                 }
                 if frame.bindings.contains(name) {
                     return if index == ctx.function_stack.len() - 1 {
@@ -601,6 +613,11 @@ impl PythonFrontend {
                     name: name.to_string(),
                 };
             }
+            if function_frame.nonlocal_decls.contains(name) {
+                if let Some(place) = self.resolve_enclosing_function_place(ctx, name) {
+                    return place;
+                }
+            }
 
             return Place::Local {
                 scope_id: function_frame.scope_id.clone(),
@@ -631,6 +648,23 @@ impl PythonFrontend {
             .map(|value| self.node_text(ctx.source, value))
             .unwrap_or_default();
         Place::Attribute { base, attr }
+    }
+
+    fn resolve_enclosing_function_place(
+        &self,
+        ctx: &LoweringContext<'_>,
+        name: &str,
+    ) -> Option<Place> {
+        for frame in ctx.function_stack.iter().rev().skip(1) {
+            if frame.bindings.contains(name) {
+                return Some(Place::Closure {
+                    scope_id: frame.scope_id.clone(),
+                    name: name.to_string(),
+                });
+            }
+        }
+
+        None
     }
 }
 
