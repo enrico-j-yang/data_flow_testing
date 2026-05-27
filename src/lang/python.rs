@@ -273,7 +273,7 @@ impl PythonFrontend {
             qualified_name: qualified_name.clone(),
             base_exprs,
             resolved_bases: Vec::new(),
-            mro_status: "parsed".to_string(),
+            mro_status: "local-unresolved".to_string(),
             methods: Vec::new(),
             span: self.span(ctx.file, ctx.source, node),
         });

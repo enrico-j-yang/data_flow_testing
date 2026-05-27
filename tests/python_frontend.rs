@@ -283,6 +283,7 @@ class Child(Base):
         .unwrap();
 
     assert_eq!(child.base_exprs, vec!["Base".to_string()]);
+    assert_eq!(child.mro_status, "local-unresolved");
     assert_eq!(outer.class_id.as_deref(), Some(child.class_id.as_str()));
     assert_eq!(inner.class_id, None);
     assert_eq!(inner_scope.parent_scope_id.as_deref(), Some(outer.scope_id.as_str()));
