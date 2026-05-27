@@ -28,7 +28,15 @@ pub fn discover_sources(config: &AnalyzeConfig) -> Result<Vec<SourceFile>> {
     let excludes = builder.build()?;
     let mut files = Vec::new();
 
-    for entry in WalkDir::new(&root).into_iter().filter_map(Result::ok) {
+    for entry in WalkDir::new(&root) {
+        let entry = entry.map_err(|err| {
+            let path = err
+                .path()
+                .unwrap_or(root.as_path())
+                .display()
+                .to_string();
+            anyhow::Error::new(err).context(format!("failed to traverse {path}"))
+        })?;
         if !entry.file_type().is_file() {
             continue;
         }
