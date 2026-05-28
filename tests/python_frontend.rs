@@ -1,9 +1,11 @@
+use data_flow_analyzer::analysis::compute_def_use_edges;
 use data_flow_analyzer::config::AnalyzeConfig;
 use data_flow_analyzer::fs::{discover_sources, SourceFile};
 use data_flow_analyzer::ir::{AnalysisCache, Place};
 use data_flow_analyzer::imports::resolve_imports;
 use data_flow_analyzer::lang::python::PythonFrontend;
 use data_flow_analyzer::lang::LanguageFrontend;
+use data_flow_analyzer::paths::{query_function_paths, PathQueryOptions};
 use std::fs;
 
 fn parse_python(source_text: &str) -> AnalysisCache {
@@ -429,4 +431,43 @@ def choose(flag):
         .edges
         .iter()
         .any(|edge| edge.from_block_id == cfg.entry_block_id && edge.edge_kind == "sequence"));
+}
+
+#[test]
+fn python_frontend_supports_def_use_path_queries() {
+    let mut cache = parse_python(
+        r#"
+def choose():
+    value = 1
+    return value
+"#,
+    );
+
+    compute_def_use_edges(&mut cache);
+
+    let function = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "choose")
+        .unwrap();
+    let edge = cache
+        .def_use_edges
+        .iter()
+        .find(|edge| edge.edge_kind == "local")
+        .unwrap();
+    let result = query_function_paths(
+        &cache,
+        &function.function_id,
+        Some(&edge.def_id),
+        Some(&edge.use_id),
+        PathQueryOptions {
+            max_loop_unroll: 2,
+            max_paths: 10,
+            max_path_len: 10,
+        },
+    );
+
+    assert_eq!(result.paths.len(), 1);
+    assert_eq!(result.paths[0].def_id, edge.def_id);
+    assert_eq!(result.paths[0].use_id, edge.use_id);
 }
