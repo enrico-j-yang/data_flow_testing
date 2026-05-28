@@ -31,3 +31,73 @@ fn bare_invocation_prints_help_with_actual_binary_name() {
         .stdout(contains("Static def-use and dependency analyzer"))
         .stdout(contains(renamed_stem));
 }
+
+#[test]
+fn analyze_command_writes_report_for_python_fixture() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("app");
+    let out = dir.path().join("report");
+    std::fs::create_dir_all(&input).unwrap();
+    std::fs::write(
+        input.join("main.py"),
+        "def main():\n    x = 1\n    print(x)\n    return x\n\nmain()\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("data-flow-analyzer").unwrap();
+    cmd.args([
+        "analyze",
+        "--lang",
+        "python",
+        "--input",
+        input.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    assert!(out.join("index.html").exists());
+    assert!(out.join("data/analysis-cache.json").exists());
+}
+
+#[test]
+fn paths_command_writes_query_result_from_cache() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("app");
+    let out = dir.path().join("report");
+    std::fs::create_dir_all(&input).unwrap();
+    std::fs::write(
+        input.join("main.py"),
+        "def main():\n    x = 1\n    print(x)\n    return x\n\nmain()\n",
+    )
+    .unwrap();
+
+    let mut analyze = Command::cargo_bin("data-flow-analyzer").unwrap();
+    analyze
+        .args([
+            "analyze",
+            "--lang",
+            "python",
+            "--input",
+            input.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let mut paths = Command::cargo_bin("data-flow-analyzer").unwrap();
+    paths
+        .args([
+            "paths",
+            "--input",
+            out.join("data/analysis-cache.json").to_str().unwrap(),
+            "--function",
+            "main",
+        ])
+        .assert()
+        .success();
+
+    assert!(out.join("data/path-query.json").exists());
+}
