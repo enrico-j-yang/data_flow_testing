@@ -8,5 +8,6 @@ pub mod ids;
 pub mod imports;
 pub mod ir;
 pub mod lang;
+pub mod paths;
 pub mod source;
 pub mod summaries;
