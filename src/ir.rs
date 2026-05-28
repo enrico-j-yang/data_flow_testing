@@ -229,7 +229,7 @@ pub struct VarDependencyEdge {
     pub span: SourceSpan,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FunctionSummary {
     pub function_id: String,
     pub inputs: Vec<Place>,
