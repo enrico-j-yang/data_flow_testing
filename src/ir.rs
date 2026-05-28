@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Place {
     Local { scope_id: String, name: String },
     Global { module_id: String, name: String },
