@@ -10,6 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
+use std::path::{Path, PathBuf};
 use tree_sitter::{Node, Parser};
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -43,11 +44,7 @@ impl PythonFrontend {
     ) {
         let file_id = stable_id("F", SCHEMA_VERSION, &[&file.relative_path]);
         let module_id = stable_id("M", SCHEMA_VERSION, &[&file.relative_path]);
-        let module_name = file
-            .relative_path
-            .strip_suffix(".py")
-            .unwrap_or(&file.relative_path)
-            .replace('/', ".");
+        let module_name = self.module_name_for_file(file);
         let module_scope_id = stable_id("S", SCHEMA_VERSION, &[&module_id, "module"]);
         let parse_status = if root.has_error() { "error" } else { "ok" };
 
@@ -157,6 +154,48 @@ impl PythonFrontend {
         });
     }
 
+    fn push_import_definition(
+        &self,
+        cache: &mut AnalysisCache,
+        ctx: &mut LoweringContext<'_>,
+        node: Node<'_>,
+        binding_name: &str,
+        expr: String,
+        def_kind: &str,
+    ) {
+        if binding_name.is_empty() || binding_name == "*" {
+            return;
+        }
+
+        let place = self.target_identifier_place(ctx, binding_name);
+        self.push_capture_record(cache, ctx, &place, "write", node);
+        let location = format!(
+            "{}:{}",
+            node.start_position().row + 1,
+            node.start_position().column + 1
+        );
+
+        cache.definitions.push(Definition {
+            def_id: stable_id(
+                "D",
+                SCHEMA_VERSION,
+                &[
+                    &ctx.file.relative_path,
+                    binding_name,
+                    def_kind,
+                    &location,
+                ],
+            ),
+            place,
+            def_kind: def_kind.to_string(),
+            scope_id: ctx.current_scope_id().to_string(),
+            function_id: ctx.current_function_id().map(str::to_string),
+            span: self.span(ctx.file, ctx.source, node),
+            expr,
+            deps: Vec::new(),
+        });
+    }
+
     fn lower_import_statement(
         &self,
         cache: &mut AnalysisCache,
@@ -179,7 +218,18 @@ impl PythonFrontend {
                 (self.node_text(ctx.source, import_node), None)
             };
 
-            self.push_import(cache, ctx, import_node, module, None, alias, 0);
+            self.push_import(cache, ctx, import_node, module, None, alias.clone(), 0);
+            let binding_name = alias
+                .clone()
+                .unwrap_or_else(|| import_binding_from_module(&self.node_text(ctx.source, import_node)));
+            self.push_import_definition(
+                cache,
+                ctx,
+                import_node,
+                &binding_name,
+                self.node_text(ctx.source, import_node),
+                "import",
+            );
         }
     }
 
@@ -216,9 +266,29 @@ impl PythonFrontend {
                 ctx,
                 import_node,
                 normalized_module.clone(),
-                name,
-                alias,
+                name.clone(),
+                alias.clone(),
                 level,
+            );
+            let binding_name = alias.clone().unwrap_or_else(|| {
+                name.as_deref()
+                    .map(leaf_name)
+                    .unwrap_or_default()
+                    .to_string()
+            });
+            let import_expr = format!(
+                "{}{}:{}",
+                ".".repeat(level),
+                normalized_module,
+                name.as_deref().unwrap_or_default()
+            );
+            self.push_import_definition(
+                cache,
+                ctx,
+                import_node,
+                &binding_name,
+                import_expr,
+                "from_import",
             );
         }
     }
@@ -750,6 +820,27 @@ impl PythonFrontend {
 
         None
     }
+
+    fn module_name_for_file(&self, file: &SourceFile) -> String {
+        let relative_module = relative_module_name(&file.relative_path);
+        let Some(root) = input_root_dir(file) else {
+            return fallback_module_name(&file.relative_path, &relative_module);
+        };
+
+        let Some(root_package) = root_package_name(&root) else {
+            return fallback_module_name(&file.relative_path, &relative_module);
+        };
+
+        if !root.join("__init__.py").exists() {
+            return fallback_module_name(&file.relative_path, &relative_module);
+        }
+
+        if relative_module.is_empty() {
+            root_package
+        } else {
+            format!("{root_package}.{relative_module}")
+        }
+    }
 }
 
 impl LanguageFrontend for PythonFrontend {
@@ -837,6 +928,59 @@ fn source_hash(source: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(source.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn input_root_dir(file: &SourceFile) -> Option<PathBuf> {
+    let depth = Path::new(&file.relative_path).components().count();
+    let mut root = file.absolute_path.clone();
+    for _ in 0..depth {
+        root = root.parent()?.to_path_buf();
+    }
+    Some(root)
+}
+
+fn root_package_name(root: &Path) -> Option<String> {
+    root.file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn relative_module_name(relative_path: &str) -> String {
+    let mut parts: Vec<&str> = relative_path.split('/').collect();
+    let Some(last) = parts.pop() else {
+        return String::new();
+    };
+
+    if last == "__init__.py" {
+        return parts.join(".");
+    }
+
+    let stem = last.strip_suffix(".py").unwrap_or(last);
+    if stem.is_empty() {
+        parts.join(".")
+    } else if parts.is_empty() {
+        stem.to_string()
+    } else {
+        parts.push(stem);
+        parts.join(".")
+    }
+}
+
+fn fallback_module_name(relative_path: &str, relative_module: &str) -> String {
+    if relative_module.is_empty() && relative_path.ends_with("__init__.py") {
+        "__init__".to_string()
+    } else {
+        relative_module.to_string()
+    }
+}
+
+fn leaf_name(value: &str) -> String {
+    value.rsplit('.').next().unwrap_or(value).to_string()
+}
+
+fn import_binding_from_module(value: &str) -> String {
+    value.split('.').next().unwrap_or(value).to_string()
 }
 
 fn collect_scope_declarations(
