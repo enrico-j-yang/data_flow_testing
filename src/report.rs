@@ -147,7 +147,8 @@ fn write_def_use_edges_csv(cache: &AnalysisCache, data_dir: &Path) -> Result<()>
             &json_field(&edge.place),
             edge.edge_kind.as_str(),
             def.map(|item| item.span.file.as_str()).unwrap_or(""),
-            &def.map(|item| item.span.line.to_string()).unwrap_or_default(),
+            &def.map(|item| item.span.line.to_string())
+                .unwrap_or_default(),
             use_site.map(|item| item.span.file.as_str()).unwrap_or(""),
             &use_site
                 .map(|item| item.span.line.to_string())
@@ -215,7 +216,9 @@ fn write_function_summaries_csv(cache: &AnalysisCache, data_dir: &Path) -> Resul
         let function = function_map.get(&summary.function_id);
         writer.write_record([
             summary.function_id.as_str(),
-            function.map(|item| item.qualified_name.as_str()).unwrap_or(""),
+            function
+                .map(|item| item.qualified_name.as_str())
+                .unwrap_or(""),
             function.map(|item| item.span.file.as_str()).unwrap_or(""),
             &function
                 .map(|item| item.span.line.to_string())
@@ -264,7 +267,11 @@ fn write_parse_diagnostics_csv(cache: &AnalysisCache, data_dir: &Path) -> Result
     Ok(())
 }
 
-fn write_graphs(cache: &AnalysisCache, graph_dir: &Path, top_n: usize) -> Result<Vec<GeneratedGraph>> {
+fn write_graphs(
+    cache: &AnalysisCache,
+    graph_dir: &Path,
+    top_n: usize,
+) -> Result<Vec<GeneratedGraph>> {
     let specs = [
         GraphSpec {
             name: "Def-use hotspots",
@@ -300,7 +307,9 @@ fn write_graphs(cache: &AnalysisCache, graph_dir: &Path, top_n: usize) -> Result
             GraphWriter::DefUseHotspots => {
                 graph::write_def_use_hotspots_dot(cache, &dot_path, spec.top_n.unwrap_or(top_n))?
             }
-            GraphWriter::ModuleDependencies => graph::write_module_dependency_dot(cache, &dot_path)?,
+            GraphWriter::ModuleDependencies => {
+                graph::write_module_dependency_dot(cache, &dot_path)?
+            }
             GraphWriter::FunctionDependencies => {
                 graph::write_function_dependency_dot(cache, &dot_path)?
             }

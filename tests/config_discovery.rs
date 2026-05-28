@@ -117,7 +117,11 @@ fn discovery_surfaces_walkdir_traversal_errors() {
 
     let output = Command::new("icacls")
         .arg(&blocked)
-        .args(["/inheritance:r", "/deny", &format!("{identity}:(OI)(CI)(RX)")])
+        .args([
+            "/inheritance:r",
+            "/deny",
+            &format!("{identity}:(OI)(CI)(RX)"),
+        ])
         .output()
         .unwrap();
     assert!(

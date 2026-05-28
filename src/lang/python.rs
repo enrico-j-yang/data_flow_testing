@@ -5,10 +5,10 @@ use crate::fs::SourceFile;
 use crate::ids::stable_id;
 use crate::ir::{
     AnalysisCache, CaptureRecord, ClassRecord, Definition, Diagnostic, FunctionRecord,
-    ImportRecord, ModuleRecord, Place, ScopeRecord, SourceFileRecord, Use, SCHEMA_VERSION,
+    ImportRecord, ModuleRecord, Place, SCHEMA_VERSION, ScopeRecord, SourceFileRecord, Use,
 };
 use crate::source::SourceSpan;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -186,12 +186,7 @@ impl PythonFrontend {
             def_id: stable_id(
                 "D",
                 SCHEMA_VERSION,
-                &[
-                    &ctx.file.relative_path,
-                    binding_name,
-                    def_kind,
-                    &location,
-                ],
+                &[&ctx.file.relative_path, binding_name, def_kind, &location],
             ),
             place,
             def_kind: def_kind.to_string(),
@@ -226,9 +221,9 @@ impl PythonFrontend {
             };
 
             self.push_import(cache, ctx, import_node, module, None, alias.clone(), 0);
-            let binding_name = alias
-                .clone()
-                .unwrap_or_else(|| import_binding_from_module(&self.node_text(ctx.source, import_node)));
+            let binding_name = alias.clone().unwrap_or_else(|| {
+                import_binding_from_module(&self.node_text(ctx.source, import_node))
+            });
             self.push_import_definition(
                 cache,
                 ctx,
@@ -844,7 +839,9 @@ impl PythonFrontend {
     }
 
     fn current_class_name<'a>(&self, ctx: &'a LoweringContext<'_>) -> Option<&'a str> {
-        ctx.class_stack.last().map(|frame| frame.qualified_name.as_str())
+        ctx.class_stack
+            .last()
+            .map(|frame| frame.qualified_name.as_str())
     }
 
     fn build_baseline_cfg(
@@ -862,7 +859,12 @@ impl PythonFrontend {
         };
 
         cfg.add_edge(&cfg.entry_block_id.clone(), &body_block, "sequence", "body");
-        cfg.add_edge(&body_block, &cfg.exit_block_id.clone(), exit_kind, exit_kind);
+        cfg.add_edge(
+            &body_block,
+            &cfg.exit_block_id.clone(),
+            exit_kind,
+            exit_kind,
+        );
         cfg
     }
 
@@ -1051,7 +1053,8 @@ fn merge_analysis_cache(target: &mut AnalysisCache, mut source: AnalysisCache) {
     target.calls.append(&mut source.calls);
     target.cfgs.append(&mut source.cfgs);
     target.def_use_edges.append(&mut source.def_use_edges);
-    target.var_dependency_edges
+    target
+        .var_dependency_edges
         .append(&mut source.var_dependency_edges);
     target
         .function_summaries

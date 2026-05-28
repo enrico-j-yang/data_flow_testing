@@ -1,5 +1,5 @@
 use crate::ids::stable_id;
-use crate::ir::{AnalysisCache, FunctionSummary, Place, VarDependencyEdge, SCHEMA_VERSION};
+use crate::ir::{AnalysisCache, FunctionSummary, Place, SCHEMA_VERSION, VarDependencyEdge};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub fn build_initial_summaries(cache: &mut AnalysisCache) {
@@ -106,7 +106,8 @@ pub fn propagate_call_summaries(cache: &mut AnalysisCache) {
                 continue;
             };
 
-            let merged = merge_candidate_summaries_from_map(&summary_by_id, &call.candidate_function_ids);
+            let merged =
+                merge_candidate_summaries_from_map(&summary_by_id, &call.candidate_function_ids);
             let mut updated = caller.clone();
             merge_places(&mut updated.returns, &merged.returns);
             merge_places(&mut updated.writes, &merged.writes);
@@ -115,10 +116,9 @@ pub fn propagate_call_summaries(cache: &mut AnalysisCache) {
             merge_strings(&mut updated.external_effects, &merged.external_effects);
 
             if matches!(call.resolution.as_str(), "external" | "unresolved") {
-                updated.external_effects.push(format!(
-                    "call:{}:{}",
-                    call.resolution, call.callee_expr
-                ));
+                updated
+                    .external_effects
+                    .push(format!("call:{}:{}", call.resolution, call.callee_expr));
             }
 
             if call.candidate_function_ids.is_empty() || merged.fixpoint_status != "fixed" {
@@ -170,7 +170,9 @@ pub fn propagate_call_summaries(cache: &mut AnalysisCache) {
         .var_dependency_edges
         .extend(propagated_edges.into_values());
     cache.function_summaries = summary_by_id.into_values().collect();
-    cache.function_summaries.sort_by(|left, right| left.function_id.cmp(&right.function_id));
+    cache
+        .function_summaries
+        .sort_by(|left, right| left.function_id.cmp(&right.function_id));
 }
 
 fn collect_return_places(cache: &AnalysisCache, function_id: &str) -> Vec<Place> {
@@ -211,16 +213,36 @@ fn merge_strings(target: &mut Vec<String>, incoming: &[String]) {
 }
 
 fn dedup_summary(mut summary: FunctionSummary) -> FunctionSummary {
-    summary.inputs = summary.inputs.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
+    summary.inputs = summary
+        .inputs
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     summary.returns = summary
         .returns
         .into_iter()
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    summary.yields = summary.yields.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
-    summary.writes = summary.writes.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
-    summary.raises = summary.raises.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
+    summary.yields = summary
+        .yields
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    summary.writes = summary
+        .writes
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    summary.raises = summary
+        .raises
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     summary.external_effects = summary
         .external_effects
         .into_iter()

@@ -2,9 +2,9 @@ use crate::analysis::{compute_def_use_edges, compute_var_dependencies};
 use crate::config::AnalyzeConfig;
 use crate::fs::discover_sources;
 use crate::imports::resolve_imports;
-use crate::lang::python::PythonFrontend;
 use crate::lang::LanguageFrontend;
-use crate::paths::{query_function_paths, PathQueryOptions};
+use crate::lang::python::PythonFrontend;
+use crate::paths::{PathQueryOptions, query_function_paths};
 use crate::report::write_report;
 use crate::summaries::{build_initial_summaries, propagate_call_summaries};
 use anyhow::{Context, Result, bail};
@@ -93,7 +93,10 @@ fn run_analyze(
     cfg.apply_cli_overrides(lang, input, out);
 
     if cfg.lang != "python" {
-        bail!("unsupported language '{}'; first version supports python", cfg.lang);
+        bail!(
+            "unsupported language '{}'; first version supports python",
+            cfg.lang
+        );
     }
 
     let files = discover_sources(&cfg)?;

@@ -37,9 +37,9 @@ fn is_simple_name(value: &str) -> bool {
 
 fn is_simple_index(value: &str) -> bool {
     !value.is_empty()
-        && value.chars().all(|ch| {
-            ch.is_ascii_alphanumeric() || ch == '_' || ch == '"' || ch == '\''
-        })
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '"' || ch == '\'')
 }
 
 #[cfg(test)]

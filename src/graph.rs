@@ -29,8 +29,9 @@ pub fn write_def_use_hotspots_dot(cache: &AnalysisCache, path: &Path, top_n: usi
 }
 
 pub fn write_module_dependency_dot(cache: &AnalysisCache, path: &Path) -> Result<()> {
-    let mut text =
-        String::from("digraph ModuleDependencies {\n  rankdir=LR;\n  node [shape=box, fontsize=10];\n");
+    let mut text = String::from(
+        "digraph ModuleDependencies {\n  rankdir=LR;\n  node [shape=box, fontsize=10];\n",
+    );
 
     for module in &cache.modules {
         text.push_str(&format!(
@@ -110,8 +111,9 @@ pub fn write_function_dependency_dot(cache: &AnalysisCache, path: &Path) -> Resu
 }
 
 pub fn write_var_dependency_dot(cache: &AnalysisCache, path: &Path, top_n: usize) -> Result<()> {
-    let mut text =
-        String::from("digraph VariableDependencies {\n  rankdir=LR;\n  node [shape=box, fontsize=10];\n");
+    let mut text = String::from(
+        "digraph VariableDependencies {\n  rankdir=LR;\n  node [shape=box, fontsize=10];\n",
+    );
 
     for edge in cache.var_dependency_edges.iter().take(top_n) {
         text.push_str(&format!(

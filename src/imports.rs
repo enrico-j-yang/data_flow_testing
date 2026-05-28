@@ -19,10 +19,7 @@ pub fn resolve_imports(cache: &mut AnalysisCache) {
         .modules
         .iter()
         .map(|module| ModuleContext {
-            file_path: file_paths
-                .get(&module.file_id)
-                .cloned()
-                .unwrap_or_default(),
+            file_path: file_paths.get(&module.file_id).cloned().unwrap_or_default(),
             module_id: module.module_id.clone(),
             module_name: module.module_name.clone(),
             is_package: file_paths
@@ -212,7 +209,9 @@ fn parse_all_expr(expr: &str) -> Option<BTreeSet<String>> {
         if item.is_empty() {
             continue;
         }
-        let quoted = item.strip_prefix('"').and_then(|value| value.strip_suffix('"'));
+        let quoted = item
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'));
         let single_quoted = item
             .strip_prefix('\'')
             .and_then(|value| value.strip_suffix('\''));
@@ -267,7 +266,12 @@ fn import_binding_name(import: &ImportRecord) -> String {
         return leaf_name(name).to_string();
     }
 
-    import.module.split('.').next().unwrap_or(&import.module).to_string()
+    import
+        .module
+        .split('.')
+        .next()
+        .unwrap_or(&import.module)
+        .to_string()
 }
 
 fn import_def_kind(import: &ImportRecord) -> &'static str {
