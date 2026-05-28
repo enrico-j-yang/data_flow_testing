@@ -9,3 +9,4 @@ pub mod imports;
 pub mod ir;
 pub mod lang;
 pub mod source;
+pub mod summaries;
