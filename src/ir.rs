@@ -372,7 +372,10 @@ mod tests {
         assert_eq!(round_trip.uses[0].use_kind, "load");
         assert_eq!(round_trip.uses[0].scope_id, "S_module");
         assert_eq!(round_trip.uses[0].function_id.as_deref(), Some("FN_main"));
-        assert_eq!(round_trip.uses[0].span, SourceSpan::synthetic("app/main.py", "x = y"));
+        assert_eq!(
+            round_trip.uses[0].span,
+            SourceSpan::synthetic("app/main.py", "x = y")
+        );
         assert_eq!(round_trip.uses[0].context, "rhs");
 
         assert_eq!(round_trip.diagnostics.len(), 1);
@@ -596,8 +599,14 @@ mod tests {
         let decoded: AnalysisCache = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.schema_version, 2);
         assert_eq!(decoded.modules[0].imports[0].alias.as_deref(), Some("sq"));
-        assert_eq!(decoded.scopes[1].parent_scope_id.as_deref(), Some("S_module"));
-        assert_eq!(decoded.classes[0].resolved_bases, vec!["app.base.Base".to_string()]);
+        assert_eq!(
+            decoded.scopes[1].parent_scope_id.as_deref(),
+            Some("S_module")
+        );
+        assert_eq!(
+            decoded.classes[0].resolved_bases,
+            vec!["app.base.Base".to_string()]
+        );
         assert_eq!(decoded.functions[0].class_id.as_deref(), Some("C_box"));
         assert_eq!(decoded.definitions[0].def_kind, "assign");
         assert_eq!(decoded.uses[0].context, "rhs");
@@ -611,6 +620,9 @@ mod tests {
             vec!["prints".to_string()]
         );
         assert_eq!(decoded.diagnostics[0].kind, "import");
-        assert_eq!(decoded.graph_index[0].svg_path.as_deref(), Some("graphs/foo.svg"));
+        assert_eq!(
+            decoded.graph_index[0].svg_path.as_deref(),
+            Some("graphs/foo.svg")
+        );
     }
 }

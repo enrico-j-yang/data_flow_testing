@@ -1,5 +1,5 @@
 use crate::ids::stable_id;
-use crate::ir::{AnalysisCache, DefUseEdge, Place, VarDependencyEdge, SCHEMA_VERSION};
+use crate::ir::{AnalysisCache, DefUseEdge, Place, SCHEMA_VERSION, VarDependencyEdge};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -142,7 +142,7 @@ impl ScopeEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{AnalysisCache, Definition, Place, Use, SCHEMA_VERSION};
+    use crate::ir::{AnalysisCache, Definition, Place, SCHEMA_VERSION, Use};
     use crate::source::SourceSpan;
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::ids::stable_id;
-use crate::ir::{AnalysisCache, CfgRecord, Definition, Use, SCHEMA_VERSION};
+use crate::ir::{AnalysisCache, CfgRecord, Definition, SCHEMA_VERSION, Use};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -89,7 +89,8 @@ pub fn query_function_paths(
             continue;
         }
 
-        let Some(start_block_id) = find_block_for_statement(cfg, &definition.def_id, &definition.span)
+        let Some(start_block_id) =
+            find_block_for_statement(cfg, &definition.def_id, &definition.span)
         else {
             continue;
         };
@@ -171,7 +172,9 @@ fn bounded_walk(
         .edges
         .iter()
         .fold(BTreeMap::<String, Vec<_>>::new(), |mut map, edge| {
-            map.entry(edge.from_block_id.clone()).or_default().push(edge);
+            map.entry(edge.from_block_id.clone())
+                .or_default()
+                .push(edge);
             map
         });
     let mut state = WalkState {
@@ -212,11 +215,12 @@ fn find_block_for_statement(
     statement_id: &str,
     span: &crate::source::SourceSpan,
 ) -> Option<String> {
-    if let Some(block) = cfg
-        .blocks
-        .iter()
-        .find(|block| block.statements.iter().any(|statement| statement == statement_id))
-    {
+    if let Some(block) = cfg.blocks.iter().find(|block| {
+        block
+            .statements
+            .iter()
+            .any(|statement| statement == statement_id)
+    }) {
         return Some(block.block_id.clone());
     }
 
@@ -369,7 +373,8 @@ fn is_def_clear_path(
     let mut seen_def = false;
 
     for block_id in block_ids {
-        let sequence = block_statement_sequence(cache, cfg, block_id, definition.function_id.as_deref());
+        let sequence =
+            block_statement_sequence(cache, cfg, block_id, definition.function_id.as_deref());
         for statement_id in sequence {
             if !seen_def {
                 if statement_id == definition.def_id {
@@ -387,7 +392,8 @@ fn is_def_clear_path(
                 .iter()
                 .find(|other_definition| other_definition.def_id == statement_id)
             {
-                if other_definition.place == *place && other_definition.def_id != definition.def_id {
+                if other_definition.place == *place && other_definition.def_id != definition.def_id
+                {
                     return false;
                 }
             }
@@ -410,7 +416,9 @@ fn block_statement_sequence(
         return block.statements.clone();
     }
 
-    collect_function_event_ids(cache, function_id).into_iter().collect()
+    collect_function_event_ids(cache, function_id)
+        .into_iter()
+        .collect()
 }
 
 fn collect_function_event_ids(cache: &AnalysisCache, function_id: Option<&str>) -> Vec<String> {
@@ -465,7 +473,7 @@ struct WalkResult {
 mod tests {
     use super::*;
     use crate::ir::{
-        AnalysisCache, CfgBlock, CfgEdge, CfgRecord, Definition, Place, Use, SCHEMA_VERSION,
+        AnalysisCache, CfgBlock, CfgEdge, CfgRecord, Definition, Place, SCHEMA_VERSION, Use,
     };
     use crate::source::SourceSpan;
 

@@ -1,11 +1,11 @@
 use data_flow_analyzer::analysis::compute_def_use_edges;
 use data_flow_analyzer::config::AnalyzeConfig;
-use data_flow_analyzer::fs::{discover_sources, SourceFile};
-use data_flow_analyzer::ir::{AnalysisCache, Place};
+use data_flow_analyzer::fs::{SourceFile, discover_sources};
 use data_flow_analyzer::imports::resolve_imports;
-use data_flow_analyzer::lang::python::PythonFrontend;
+use data_flow_analyzer::ir::{AnalysisCache, Place};
 use data_flow_analyzer::lang::LanguageFrontend;
-use data_flow_analyzer::paths::{query_function_paths, PathQueryOptions};
+use data_flow_analyzer::lang::python::PythonFrontend;
+use data_flow_analyzer::paths::{PathQueryOptions, query_function_paths};
 use std::fs;
 
 fn parse_python(source_text: &str) -> AnalysisCache {
@@ -164,10 +164,12 @@ class Child:
     assert_eq!(inner.params, vec!["value".to_string()]);
     assert_eq!(inner.class_id, None);
     assert_eq!(class.methods, vec![outer.function_id.clone()]);
-    assert!(cache
-        .functions
-        .iter()
-        .all(|function| function.qualified_name != "Child.inner"));
+    assert!(
+        cache
+            .functions
+            .iter()
+            .all(|function| function.qualified_name != "Child.inner")
+    );
 
     assert!(cache.uses.iter().any(|use_record| {
         use_record.function_id.as_deref() == Some(outer.function_id.as_str())
@@ -290,7 +292,10 @@ class Child(Base):
     assert_eq!(child.mro_status, "local-unresolved");
     assert_eq!(outer.class_id.as_deref(), Some(child.class_id.as_str()));
     assert_eq!(inner.class_id, None);
-    assert_eq!(inner_scope.parent_scope_id.as_deref(), Some(outer.scope_id.as_str()));
+    assert_eq!(
+        inner_scope.parent_scope_id.as_deref(),
+        Some(outer.scope_id.as_str())
+    );
 
     assert!(cache.definitions.iter().any(|definition| {
         definition.function_id.as_deref() == Some(outer.function_id.as_str())
@@ -344,7 +349,11 @@ fn import_resolver_handles_init_all_and_reexports() {
     )
     .unwrap();
     fs::write(pkg.join("config.py"), "settings = {'debug': True}\n").unwrap();
-    fs::write(pkg.join("main.py"), "from app import settings\nvalue = settings\n").unwrap();
+    fs::write(
+        pkg.join("main.py"),
+        "from app import settings\nvalue = settings\n",
+    )
+    .unwrap();
 
     let cfg = AnalyzeConfig {
         input: pkg.clone(),
@@ -356,11 +365,17 @@ fn import_resolver_handles_init_all_and_reexports() {
     resolve_imports(&mut cache);
 
     let imports = cache.imports();
-    assert!(imports.iter().any(|import| import.resolution == "project-local"));
-    assert!(cache
-        .modules
-        .iter()
-        .any(|module| module.exports.iter().any(|export| export == "settings")));
+    assert!(
+        imports
+            .iter()
+            .any(|import| import.resolution == "project-local")
+    );
+    assert!(
+        cache
+            .modules
+            .iter()
+            .any(|module| module.exports.iter().any(|export| export == "settings"))
+    );
 }
 
 #[test]
@@ -425,12 +440,25 @@ def choose(flag):
         .find(|cfg| cfg.function_id == function.function_id)
         .unwrap();
 
-    assert_eq!(cfg.blocks.iter().filter(|block| block.block_kind == "Entry").count(), 1);
-    assert_eq!(cfg.blocks.iter().filter(|block| block.block_kind == "Exit").count(), 1);
-    assert!(cfg
-        .edges
-        .iter()
-        .any(|edge| edge.from_block_id == cfg.entry_block_id && edge.edge_kind == "sequence"));
+    assert_eq!(
+        cfg.blocks
+            .iter()
+            .filter(|block| block.block_kind == "Entry")
+            .count(),
+        1
+    );
+    assert_eq!(
+        cfg.blocks
+            .iter()
+            .filter(|block| block.block_kind == "Exit")
+            .count(),
+        1
+    );
+    assert!(
+        cfg.edges
+            .iter()
+            .any(|edge| edge.from_block_id == cfg.entry_block_id && edge.edge_kind == "sequence")
+    );
 }
 
 #[test]
@@ -484,18 +512,23 @@ fn parser_records_diagnostics_for_broken_python_and_keeps_file() {
 
     let cache = PythonFrontend::new().parse_files(&[source]).unwrap();
     assert_eq!(cache.files[0].parse_status, "partial");
-    assert!(cache
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.kind == "parse-error"));
+    assert!(
+        cache
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.kind == "parse-error")
+    );
 }
 
 #[test]
 fn parser_output_is_deterministic_across_runs() {
     let dir = tempfile::tempdir().unwrap();
     for idx in 0..10 {
-        std::fs::write(dir.path().join(format!("m{idx}.py")), format!("x{idx} = {idx}\n"))
-            .unwrap();
+        std::fs::write(
+            dir.path().join(format!("m{idx}.py")),
+            format!("x{idx} = {idx}\n"),
+        )
+        .unwrap();
     }
     let cfg = AnalyzeConfig {
         input: dir.path().to_path_buf(),

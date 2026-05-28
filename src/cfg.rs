@@ -102,6 +102,10 @@ mod tests {
 
         assert!(cfg.edges.iter().any(|edge| edge.edge_kind == "loop-else"));
         assert!(cfg.edges.iter().any(|edge| edge.edge_kind == "break-exit"));
-        assert!(cfg.edges.iter().any(|edge| edge.edge_kind == "continue-back"));
+        assert!(
+            cfg.edges
+                .iter()
+                .any(|edge| edge.edge_kind == "continue-back")
+        );
     }
 }
