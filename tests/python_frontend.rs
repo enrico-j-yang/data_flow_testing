@@ -1,5 +1,7 @@
-use data_flow_analyzer::fs::SourceFile;
+use data_flow_analyzer::config::AnalyzeConfig;
+use data_flow_analyzer::fs::{discover_sources, SourceFile};
 use data_flow_analyzer::ir::{AnalysisCache, Place};
+use data_flow_analyzer::imports::resolve_imports;
 use data_flow_analyzer::lang::python::PythonFrontend;
 use data_flow_analyzer::lang::LanguageFrontend;
 use std::fs;
@@ -327,4 +329,34 @@ class Child(Base):
                     if scope_id == &outer.scope_id && name == "total"
             )
     }));
+}
+
+#[test]
+fn import_resolver_handles_init_all_and_reexports() {
+    let dir = tempfile::tempdir().unwrap();
+    let pkg = dir.path().join("app");
+    fs::create_dir_all(&pkg).unwrap();
+    fs::write(
+        pkg.join("__init__.py"),
+        "__all__ = ['settings']\nfrom .config import settings\n",
+    )
+    .unwrap();
+    fs::write(pkg.join("config.py"), "settings = {'debug': True}\n").unwrap();
+    fs::write(pkg.join("main.py"), "from app import settings\nvalue = settings\n").unwrap();
+
+    let cfg = AnalyzeConfig {
+        input: pkg.clone(),
+        ..AnalyzeConfig::default()
+    };
+    let files = discover_sources(&cfg).unwrap();
+    let mut cache = PythonFrontend::new().parse_files(&files).unwrap();
+
+    resolve_imports(&mut cache);
+
+    let imports = cache.imports();
+    assert!(imports.iter().any(|import| import.resolution == "project-local"));
+    assert!(cache
+        .modules
+        .iter()
+        .any(|module| module.exports.iter().any(|export| export == "settings")));
 }
