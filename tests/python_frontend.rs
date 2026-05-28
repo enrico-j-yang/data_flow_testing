@@ -471,3 +471,21 @@ def choose():
     assert_eq!(result.paths[0].def_id, edge.def_id);
     assert_eq!(result.paths[0].use_id, edge.use_id);
 }
+
+#[test]
+fn parser_records_diagnostics_for_broken_python_and_keeps_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("broken.py");
+    std::fs::write(&path, "x = 1\ndef bad(:\n    pass\nz = x\n").unwrap();
+    let source = SourceFile {
+        absolute_path: path,
+        relative_path: "broken.py".to_string(),
+    };
+
+    let cache = PythonFrontend::new().parse_files(&[source]).unwrap();
+    assert_eq!(cache.files[0].parse_status, "partial");
+    assert!(cache
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.kind == "parse-error"));
+}
