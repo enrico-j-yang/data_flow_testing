@@ -1,4 +1,5 @@
 pub mod alias;
+pub mod cfg;
 pub mod cli;
 pub mod config;
 pub mod fs;

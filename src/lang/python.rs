@@ -1,5 +1,6 @@
 use super::LanguageFrontend;
 use crate::alias::{normalize_attribute, normalize_subscript};
+use crate::cfg::ControlFlowGraph;
 use crate::fs::SourceFile;
 use crate::ids::stable_id;
 use crate::ir::{
@@ -452,7 +453,7 @@ impl PythonFrontend {
         }
 
         ctx.function_stack.push(FunctionFrame {
-            function_id,
+            function_id: function_id.clone(),
             qualified_name,
             scope_id,
             bindings,
@@ -467,6 +468,8 @@ impl PythonFrontend {
             for child in body.named_children(&mut cursor) {
                 self.walk(cache, ctx, child);
             }
+            let cfg = self.build_baseline_cfg(ctx, &function_id, body);
+            cache.cfgs.push(cfg.into_record());
         }
 
         ctx.function_stack.pop();
@@ -839,6 +842,25 @@ impl PythonFrontend {
         ctx.class_stack.last().map(|frame| frame.qualified_name.as_str())
     }
 
+    fn build_baseline_cfg(
+        &self,
+        ctx: &LoweringContext<'_>,
+        function_id: &str,
+        body: Node<'_>,
+    ) -> ControlFlowGraph {
+        let mut cfg = ControlFlowGraph::new(function_id.to_string());
+        let body_block = cfg.add_block("BasicBlock", self.span(ctx.file, ctx.source, body));
+        let exit_kind = if contains_return(body) {
+            "return"
+        } else {
+            "sequence"
+        };
+
+        cfg.add_edge(&cfg.entry_block_id.clone(), &body_block, "sequence", "body");
+        cfg.add_edge(&body_block, &cfg.exit_block_id.clone(), exit_kind, exit_kind);
+        cfg
+    }
+
     fn module_name_for_file(&self, file: &SourceFile) -> String {
         let relative_module = relative_module_name(&file.relative_path);
         let Some(root) = input_root_dir(file) else {
@@ -1009,6 +1031,20 @@ fn collect_scope_declarations(
     let mut declarations = ScopeDeclarations::default();
     scan_scope_declarations(frontend, source, node, &mut declarations);
     declarations
+}
+
+fn contains_return(node: Node<'_>) -> bool {
+    if node.kind() == "return_statement" {
+        return true;
+    }
+
+    match node.kind() {
+        "function_definition" | "class_definition" | "lambda" => false,
+        _ => {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor).any(contains_return)
+        }
+    }
 }
 
 fn scan_scope_declarations(

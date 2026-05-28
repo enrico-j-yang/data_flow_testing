@@ -399,3 +399,34 @@ class Child:
             )
     }));
 }
+
+#[test]
+fn python_frontend_emits_baseline_cfg_for_functions() {
+    let cache = parse_python(
+        r#"
+def choose(flag):
+    value = 1
+    if flag:
+        return value
+    return 0
+"#,
+    );
+
+    let function = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "choose")
+        .unwrap();
+    let cfg = cache
+        .cfgs
+        .iter()
+        .find(|cfg| cfg.function_id == function.function_id)
+        .unwrap();
+
+    assert_eq!(cfg.blocks.iter().filter(|block| block.block_kind == "Entry").count(), 1);
+    assert_eq!(cfg.blocks.iter().filter(|block| block.block_kind == "Exit").count(), 1);
+    assert!(cfg
+        .edges
+        .iter()
+        .any(|edge| edge.from_block_id == cfg.entry_block_id && edge.edge_kind == "sequence"));
+}
