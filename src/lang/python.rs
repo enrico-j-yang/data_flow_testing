@@ -9,6 +9,7 @@ use crate::ir::{
 };
 use crate::source::SourceSpan;
 use anyhow::{anyhow, Context, Result};
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
@@ -924,29 +925,57 @@ impl PythonFrontend {
 
 impl LanguageFrontend for PythonFrontend {
     fn parse_files(&self, files: &[SourceFile]) -> Result<AnalysisCache> {
-        let mut parser = Parser::new();
-        parser
-            .set_language(&tree_sitter_python::LANGUAGE.into())
-            .context("failed to load tree-sitter-python")?;
+        let mut partials = files
+            .par_iter()
+            .map(|file| -> Result<(String, AnalysisCache)> {
+                let cache = self.parse_single_file(file)?;
+                let key = cache
+                    .files
+                    .first()
+                    .map(|record| record.path.clone())
+                    .unwrap_or_else(|| file.relative_path.clone());
+                Ok((key, cache))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        partials.sort_by(|left, right| left.0.cmp(&right.0));
 
         let mut cache = AnalysisCache {
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             ..AnalysisCache::default()
         };
 
-        for file in files {
-            let source = fs::read_to_string(&file.absolute_path)
-                .with_context(|| format!("failed to read {}", file.absolute_path.display()))?;
-            let tree = parser.parse(&source, None).ok_or_else(|| {
-                anyhow!(
-                    "tree-sitter returned no parse tree for {}",
-                    file.relative_path
-                )
-            })?;
-            self.record_parse_errors(&mut cache, file, &source, tree.root_node());
-            self.lower_module(&mut cache, file, &source, tree.root_node());
+        for (_, partial) in partials {
+            merge_analysis_cache(&mut cache, partial);
         }
 
+        Ok(cache)
+    }
+}
+
+impl PythonFrontend {
+    fn parse_single_file(&self, file: &SourceFile) -> Result<AnalysisCache> {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
+            .context("failed to load tree-sitter-python")?;
+
+        let source = fs::read_to_string(&file.absolute_path)
+            .with_context(|| format!("failed to read {}", file.absolute_path.display()))?;
+        let tree = parser.parse(&source, None).ok_or_else(|| {
+            anyhow!(
+                "tree-sitter returned no parse tree for {}",
+                file.relative_path
+            )
+        })?;
+
+        let mut cache = AnalysisCache {
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            ..AnalysisCache::default()
+        };
+        self.record_parse_errors(&mut cache, file, &source, tree.root_node());
+        self.lower_module(&mut cache, file, &source, tree.root_node());
         Ok(cache)
     }
 }
@@ -1008,6 +1037,27 @@ fn source_hash(source: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(source.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn merge_analysis_cache(target: &mut AnalysisCache, mut source: AnalysisCache) {
+    target.files.append(&mut source.files);
+    target.modules.append(&mut source.modules);
+    target.scopes.append(&mut source.scopes);
+    target.classes.append(&mut source.classes);
+    target.functions.append(&mut source.functions);
+    target.definitions.append(&mut source.definitions);
+    target.uses.append(&mut source.uses);
+    target.captures.append(&mut source.captures);
+    target.calls.append(&mut source.calls);
+    target.cfgs.append(&mut source.cfgs);
+    target.def_use_edges.append(&mut source.def_use_edges);
+    target.var_dependency_edges
+        .append(&mut source.var_dependency_edges);
+    target
+        .function_summaries
+        .append(&mut source.function_summaries);
+    target.diagnostics.append(&mut source.diagnostics);
+    target.graph_index.append(&mut source.graph_index);
 }
 
 fn input_root_dir(file: &SourceFile) -> Option<PathBuf> {

@@ -489,3 +489,23 @@ fn parser_records_diagnostics_for_broken_python_and_keeps_file() {
         .iter()
         .any(|diagnostic| diagnostic.kind == "parse-error"));
 }
+
+#[test]
+fn parser_output_is_deterministic_across_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    for idx in 0..10 {
+        std::fs::write(dir.path().join(format!("m{idx}.py")), format!("x{idx} = {idx}\n"))
+            .unwrap();
+    }
+    let cfg = AnalyzeConfig {
+        input: dir.path().to_path_buf(),
+        ..AnalyzeConfig::default()
+    };
+    let files = discover_sources(&cfg).unwrap();
+    let a = PythonFrontend::new().parse_files(&files).unwrap();
+    let b = PythonFrontend::new().parse_files(&files).unwrap();
+    assert_eq!(
+        serde_json::to_string(&a.definitions).unwrap(),
+        serde_json::to_string(&b.definitions).unwrap()
+    );
+}

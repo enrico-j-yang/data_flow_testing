@@ -91,6 +91,13 @@ impl AnalyzeConfig {
             self.out = out;
         }
     }
+
+    pub fn parallelism_threads(&self) -> Option<usize> {
+        match self.parallelism.trim() {
+            "" | "auto" => None,
+            value => value.parse::<usize>().ok().filter(|threads| *threads > 0),
+        }
+    }
 }
 
 impl RawAnalyzeConfig {
