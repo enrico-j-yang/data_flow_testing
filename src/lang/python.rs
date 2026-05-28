@@ -1,4 +1,5 @@
 use super::LanguageFrontend;
+use crate::alias::{normalize_attribute, normalize_subscript};
 use crate::fs::SourceFile;
 use crate::ids::stable_id;
 use crate::ir::{
@@ -660,6 +661,7 @@ impl PythonFrontend {
                 Some(self.resolve_identifier_use_place(ctx, &self.node_text(ctx.source, node)))
             }
             "attribute" => Some(self.attribute_place(ctx, node)),
+            "subscript" => Some(self.subscript_place(ctx, node)),
             _ => None,
         }
     }
@@ -670,6 +672,7 @@ impl PythonFrontend {
                 Some(self.target_identifier_place(ctx, &self.node_text(ctx.source, node)))
             }
             "attribute" => Some(self.attribute_place(ctx, node)),
+            "subscript" => Some(self.subscript_place(ctx, node)),
             _ => None,
         }
     }
@@ -801,7 +804,18 @@ impl PythonFrontend {
             .child_by_field_name("attribute")
             .map(|value| self.node_text(ctx.source, value))
             .unwrap_or_default();
-        Place::Attribute { base, attr }
+        normalize_attribute(self.current_class_name(ctx), &base, &attr)
+    }
+
+    fn subscript_place(&self, ctx: &LoweringContext<'_>, node: Node<'_>) -> Place {
+        let base = node
+            .child_by_field_name("value")
+            .map(|value| self.node_text(ctx.source, value))
+            .unwrap_or_default();
+        let index = node
+            .child_by_field_name("subscript")
+            .map(|value| self.node_text(ctx.source, value));
+        normalize_subscript(&base, index.as_deref())
     }
 
     fn resolve_enclosing_function_place(
@@ -819,6 +833,10 @@ impl PythonFrontend {
         }
 
         None
+    }
+
+    fn current_class_name<'a>(&self, ctx: &'a LoweringContext<'_>) -> Option<&'a str> {
+        ctx.class_stack.last().map(|frame| frame.qualified_name.as_str())
     }
 
     fn module_name_for_file(&self, file: &SourceFile) -> String {
@@ -1174,7 +1192,7 @@ fn collect_assignment_targets<'tree>(
 
 fn collect_binding_target_nodes<'tree>(node: Node<'tree>, targets: &mut Vec<Node<'tree>>) {
     match node.kind() {
-        "identifier" | "attribute" => targets.push(node),
+        "identifier" | "attribute" | "subscript" => targets.push(node),
         "pattern_list"
         | "tuple_pattern"
         | "list_pattern"
@@ -1203,7 +1221,7 @@ fn expression_uses(node: Node<'_>) -> Vec<Node<'_>> {
 
 fn collect_expression_uses<'tree>(node: Node<'tree>, nodes: &mut Vec<Node<'tree>>) {
     match node.kind() {
-        "identifier" | "attribute" => nodes.push(node),
+        "identifier" | "attribute" | "subscript" => nodes.push(node),
         _ => {
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {

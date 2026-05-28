@@ -360,3 +360,42 @@ fn import_resolver_handles_init_all_and_reexports() {
         .iter()
         .any(|module| module.exports.iter().any(|export| export == "settings")));
 }
+
+#[test]
+fn python_frontend_normalizes_attribute_and_subscript_places() {
+    let cache = parse_python(
+        r#"
+class Child:
+    def method(self, items, index, value):
+        self.token = value
+        local = self.token
+        current = items[index]
+        items[index] = local
+        return current
+"#,
+    );
+
+    let method = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "Child.method")
+        .unwrap();
+
+    assert!(cache.definitions.iter().any(|definition| {
+        definition.function_id.as_deref() == Some(method.function_id.as_str())
+            && matches!(
+                &definition.place,
+                Place::Attribute { base, attr }
+                    if base == "InstanceField(Child)" && attr == "token"
+            )
+    }));
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(method.function_id.as_str())
+            && matches!(
+                &use_record.place,
+                Place::Subscript { base, index }
+                    if base == "items" && index == "index"
+            )
+    }));
+}
