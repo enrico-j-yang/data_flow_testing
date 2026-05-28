@@ -4,8 +4,8 @@ use crate::cfg::ControlFlowGraph;
 use crate::fs::SourceFile;
 use crate::ids::stable_id;
 use crate::ir::{
-    AnalysisCache, CaptureRecord, ClassRecord, Definition, FunctionRecord, ImportRecord,
-    ModuleRecord, Place, ScopeRecord, SourceFileRecord, Use, SCHEMA_VERSION,
+    AnalysisCache, CaptureRecord, ClassRecord, Definition, Diagnostic, FunctionRecord,
+    ImportRecord, ModuleRecord, Place, ScopeRecord, SourceFileRecord, Use, SCHEMA_VERSION,
 };
 use crate::source::SourceSpan;
 use anyhow::{anyhow, Context, Result};
@@ -48,7 +48,7 @@ impl PythonFrontend {
         let module_id = stable_id("M", SCHEMA_VERSION, &[&file.relative_path]);
         let module_name = self.module_name_for_file(file);
         let module_scope_id = stable_id("S", SCHEMA_VERSION, &[&module_id, "module"]);
-        let parse_status = if root.has_error() { "error" } else { "ok" };
+        let parse_status = if root.has_error() { "partial" } else { "ok" };
 
         cache.files.push(SourceFileRecord {
             file_id: file_id.clone(),
@@ -92,6 +92,10 @@ impl PythonFrontend {
     }
 
     fn walk(&self, cache: &mut AnalysisCache, ctx: &mut LoweringContext<'_>, node: Node<'_>) {
+        if node.is_error() || node.is_missing() || node.kind() == "ERROR" {
+            return;
+        }
+
         match node.kind() {
             "future_import_statement" | "import_statement" => {
                 self.lower_import_statement(cache, ctx, node)
@@ -881,6 +885,41 @@ impl PythonFrontend {
             format!("{root_package}.{relative_module}")
         }
     }
+
+    fn record_parse_errors(
+        &self,
+        cache: &mut AnalysisCache,
+        file: &SourceFile,
+        source: &str,
+        node: Node<'_>,
+    ) {
+        if node.is_error() || node.is_missing() || node.kind() == "ERROR" {
+            cache.diagnostics.push(Diagnostic {
+                diagnostic_id: stable_id(
+                    "DIAG",
+                    SCHEMA_VERSION,
+                    &[
+                        &file.relative_path,
+                        "parse-error",
+                        &node.start_byte().to_string(),
+                    ],
+                ),
+                severity: "warning".to_string(),
+                kind: "parse-error".to_string(),
+                message:
+                    "tree-sitter reported an invalid parse node; analysis skipped this subtree"
+                        .to_string(),
+                file: file.relative_path.clone(),
+                span: self.span(file, source, node),
+            });
+            return;
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.record_parse_errors(cache, file, source, child);
+        }
+    }
 }
 
 impl LanguageFrontend for PythonFrontend {
@@ -904,6 +943,7 @@ impl LanguageFrontend for PythonFrontend {
                     file.relative_path
                 )
             })?;
+            self.record_parse_errors(&mut cache, file, &source, tree.root_node());
             self.lower_module(&mut cache, file, &source, tree.root_node());
         }
 
@@ -1053,6 +1093,10 @@ fn scan_scope_declarations(
     node: Node<'_>,
     declarations: &mut ScopeDeclarations,
 ) {
+    if node.is_error() || node.is_missing() || node.kind() == "ERROR" {
+        return;
+    }
+
     match node.kind() {
         "function_definition" | "class_definition" => {
             if let Some(name_node) = node.child_by_field_name("name") {
