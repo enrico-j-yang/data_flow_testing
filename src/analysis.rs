@@ -1,5 +1,6 @@
 use crate::ids::stable_id;
 use crate::ir::{AnalysisCache, DefUseEdge, Place, VarDependencyEdge, SCHEMA_VERSION};
+use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub fn compute_def_use_edges(cache: &mut AnalysisCache) {
@@ -26,55 +27,79 @@ pub fn compute_def_use_edges(cache: &mut AnalysisCache) {
             .push(ScopeEvent::usage(index, use_site));
     }
 
-    for events in events_by_scope.values_mut() {
-        events.sort();
-        let mut reaching: BTreeMap<Place, BTreeSet<String>> = BTreeMap::new();
-
-        for event in events.iter() {
-            if event.is_definition {
-                reaching.insert(
-                    event.place.clone(),
-                    BTreeSet::from([event.record_id.clone()]),
-                );
-                continue;
-            }
-
-            if let Some(def_ids) = reaching.get(&event.place) {
-                for def_id in def_ids {
-                    let place = def_places
-                        .get(def_id)
-                        .cloned()
-                        .unwrap_or_else(|| event.place.clone());
-                    cache.def_use_edges.push(DefUseEdge {
-                        edge_id: stable_id("DU", SCHEMA_VERSION, &[def_id, &event.record_id]),
-                        def_id: def_id.clone(),
-                        use_id: event.record_id.clone(),
-                        place,
-                        edge_kind: "local".to_string(),
-                        path_summary: "ordered scope reaching approximation".to_string(),
-                    });
-                }
-            }
-        }
-    }
+    let mut edges = events_by_scope
+        .into_values()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|mut events| process_scope_events(&mut events, &def_places))
+        .flatten()
+        .collect::<Vec<_>>();
+    edges.sort_by(|left, right| left.edge_id.cmp(&right.edge_id));
+    cache.def_use_edges = edges;
 }
 
 pub fn compute_var_dependencies(cache: &mut AnalysisCache) {
-    cache.var_dependency_edges.clear();
+    let mut edges = cache
+        .definitions
+        .par_iter()
+        .map(|def| {
+            def.deps
+                .iter()
+                .map(|dep| VarDependencyEdge {
+                    edge_id: stable_id("VD", SCHEMA_VERSION, &[&def.def_id, &format!("{dep:?}")]),
+                    source_place: dep.clone(),
+                    target_place: def.place.clone(),
+                    source_id: format!("{dep:?}"),
+                    target_id: def.def_id.clone(),
+                    dep_kind: "assignment".to_string(),
+                    span: def.span.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .reduce(Vec::new, |mut left, mut right| {
+            left.append(&mut right);
+            left
+        });
+    edges.sort_by(|left, right| left.edge_id.cmp(&right.edge_id));
+    cache.var_dependency_edges = edges;
+}
 
-    for def in &cache.definitions {
-        for dep in &def.deps {
-            cache.var_dependency_edges.push(VarDependencyEdge {
-                edge_id: stable_id("VD", SCHEMA_VERSION, &[&def.def_id, &format!("{dep:?}")]),
-                source_place: dep.clone(),
-                target_place: def.place.clone(),
-                source_id: format!("{dep:?}"),
-                target_id: def.def_id.clone(),
-                dep_kind: "assignment".to_string(),
-                span: def.span.clone(),
-            });
+fn process_scope_events(
+    events: &mut [ScopeEvent],
+    def_places: &BTreeMap<String, Place>,
+) -> Vec<DefUseEdge> {
+    events.sort();
+    let mut reaching: BTreeMap<Place, BTreeSet<String>> = BTreeMap::new();
+    let mut edges = Vec::new();
+
+    for event in events.iter() {
+        if event.is_definition {
+            reaching.insert(
+                event.place.clone(),
+                BTreeSet::from([event.record_id.clone()]),
+            );
+            continue;
+        }
+
+        if let Some(def_ids) = reaching.get(&event.place) {
+            for def_id in def_ids {
+                let place = def_places
+                    .get(def_id)
+                    .cloned()
+                    .unwrap_or_else(|| event.place.clone());
+                edges.push(DefUseEdge {
+                    edge_id: stable_id("DU", SCHEMA_VERSION, &[def_id, &event.record_id]),
+                    def_id: def_id.clone(),
+                    use_id: event.record_id.clone(),
+                    place,
+                    edge_kind: "local".to_string(),
+                    path_summary: "ordered scope reaching approximation".to_string(),
+                });
+            }
         }
     }
+
+    edges
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
