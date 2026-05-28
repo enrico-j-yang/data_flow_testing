@@ -4,6 +4,7 @@ pub mod cfg;
 pub mod cli;
 pub mod config;
 pub mod fs;
+pub mod graph;
 pub mod ids;
 pub mod imports;
 pub mod ir;
