@@ -10,5 +10,6 @@ pub mod imports;
 pub mod ir;
 pub mod lang;
 pub mod paths;
+pub mod report;
 pub mod source;
 pub mod summaries;
