@@ -15,7 +15,13 @@ pub fn stable_id(prefix: &str, schema_version: u32, parts: &[&str]) -> String {
 pub fn safe_slug(value: &str) -> String {
     value
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 

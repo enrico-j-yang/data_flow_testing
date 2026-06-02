@@ -1,4 +1,4 @@
-use data_flow_analyzer::analysis::compute_def_use_edges;
+use data_flow_analyzer::analysis::{compute_def_use_edges, compute_var_dependencies};
 use data_flow_analyzer::config::AnalyzeConfig;
 use data_flow_analyzer::fs::{SourceFile, discover_sources};
 use data_flow_analyzer::imports::resolve_imports;
@@ -413,6 +413,403 @@ class Child:
                 &use_record.place,
                 Place::Subscript { base, index }
                     if base == "items" && index == "index"
+            )
+    }));
+}
+
+#[test]
+fn python_frontend_records_base_and_slice_uses_for_subscript_slices() {
+    let mut cache = parse_python(
+        r#"
+class Child:
+    def method(self, silence_data, start_pos, end_pos):
+        slice_data = silence_data[start_pos:end_pos]
+        return slice_data
+"#,
+    );
+
+    let method = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "Child.method")
+        .unwrap();
+    let method_id = method.function_id.clone();
+    let method_scope_id = method.scope_id.clone();
+
+    compute_def_use_edges(&mut cache);
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(method_id.as_str())
+            && use_record.span.line == 4
+            && matches!(
+                &use_record.place,
+                Place::Local { scope_id, name }
+                    if scope_id == &method_scope_id && name == "silence_data"
+            )
+    }));
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(method_id.as_str())
+            && use_record.span.line == 4
+            && matches!(
+                &use_record.place,
+                Place::Local { scope_id, name }
+                    if scope_id == &method_scope_id && name == "start_pos"
+            )
+    }));
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(method_id.as_str())
+            && use_record.span.line == 4
+            && matches!(
+                &use_record.place,
+                Place::Local { scope_id, name }
+                    if scope_id == &method_scope_id && name == "end_pos"
+            )
+    }));
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(method_id.as_str())
+            && use_record.span.line == 4
+            && matches!(
+                &use_record.place,
+                Place::Subscript { base, index }
+                    if base == "silence_data" && index == "*"
+            )
+    }));
+
+    let silence_def_id = cache
+        .definitions
+        .iter()
+        .find(|definition| {
+            definition.function_id.as_deref() == Some(method_id.as_str())
+                && definition.def_kind == "param"
+                && matches!(
+                    &definition.place,
+                    Place::Local { scope_id, name }
+                        if scope_id == &method_scope_id && name == "silence_data"
+                )
+        })
+        .map(|definition| definition.def_id.clone())
+        .unwrap();
+
+    assert!(cache.def_use_edges.iter().any(|edge| {
+        edge.def_id == silence_def_id
+            && cache.uses.iter().any(|use_record| {
+                use_record.use_id == edge.use_id
+                    && use_record.span.line == 4
+                    && matches!(
+                        &use_record.place,
+                        Place::Local { scope_id, name }
+                            if scope_id == &method_scope_id && name == "silence_data"
+                    )
+            })
+    }));
+}
+
+#[test]
+fn python_frontend_lowers_expression_statement_receiver_and_argument_uses() {
+    let mut cache = parse_python(
+        r#"
+class Client:
+    def method(self, processed_text):
+        self.current_result.actual_text = processed_text
+        self.real_text_list.append(self.current_result.actual_text)
+"#,
+    );
+
+    let method = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "Client.method")
+        .unwrap();
+    let method_id = method.function_id.clone();
+    let method_scope_id = method.scope_id.clone();
+
+    compute_def_use_edges(&mut cache);
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(method_id.as_str())
+            && use_record.span.line == 5
+            && matches!(
+                &use_record.place,
+                Place::Attribute { base, attr }
+                    if base == "InstanceField(Client)" && attr == "real_text_list"
+            )
+    }));
+
+    let actual_text_use_id = cache
+        .uses
+        .iter()
+        .find(|use_record| {
+            use_record.function_id.as_deref() == Some(method_id.as_str())
+                && use_record.span.line == 5
+                && matches!(
+                    &use_record.place,
+                    Place::Attribute { base, attr } if base == "*" && attr == "actual_text"
+                )
+        })
+        .map(|use_record| use_record.use_id.clone())
+        .expect("expression statement should lower actual_text argument use");
+
+    let actual_text_def_id = cache
+        .definitions
+        .iter()
+        .find(|definition| {
+            definition.function_id.as_deref() == Some(method_id.as_str())
+                && definition.span.line == 4
+                && matches!(
+                    &definition.place,
+                    Place::Attribute { base, attr } if base == "*" && attr == "actual_text"
+                )
+        })
+        .map(|definition| definition.def_id.clone())
+        .expect("assignment should define actual_text");
+
+    assert!(
+        cache
+            .def_use_edges
+            .iter()
+            .any(|edge| { edge.def_id == actual_text_def_id && edge.use_id == actual_text_use_id })
+    );
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(method_id.as_str())
+            && matches!(
+                &use_record.place,
+                Place::Local { scope_id, name }
+                    if scope_id == &method_scope_id && name == "processed_text"
+            )
+    }));
+}
+
+#[test]
+fn python_frontend_lowers_mutating_receiver_calls_as_synthetic_definitions() {
+    let mut cache = parse_python(
+        r#"
+class Client:
+    def method(self, processed_text):
+        self.current_result.actual_text = processed_text
+        self.real_text_list.append(self.current_result.actual_text)
+        buffer = self.real_text_list
+"#,
+    );
+
+    let method = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "Client.method")
+        .unwrap();
+    let method_id = method.function_id.clone();
+    let method_scope_id = method.scope_id.clone();
+
+    compute_def_use_edges(&mut cache);
+    compute_var_dependencies(&mut cache);
+
+    let real_text_list_def_id = cache
+        .definitions
+        .iter()
+        .find(|definition| {
+            definition.function_id.as_deref() == Some(method_id.as_str())
+                && definition.span.line == 5
+                && matches!(
+                    &definition.place,
+                    Place::Attribute { base, attr }
+                        if base == "InstanceField(Client)" && attr == "real_text_list"
+                )
+        })
+        .map(|definition| definition.def_id.clone())
+        .expect("mutating receiver call should synthesize a definition for self.real_text_list");
+
+    assert!(cache.var_dependency_edges.iter().any(|edge| {
+        edge.target_id == real_text_list_def_id
+            && cache.uses.iter().any(|use_record| {
+                use_record.use_id == edge.source_id
+                    && use_record.function_id.as_deref() == Some(method_id.as_str())
+                    && use_record.span.line == 5
+                    && matches!(
+                        &use_record.place,
+                        Place::Attribute { base, attr } if base == "*" && attr == "actual_text"
+                    )
+            })
+    }));
+
+    assert!(cache.def_use_edges.iter().any(|edge| {
+        edge.def_id == real_text_list_def_id
+            && cache.uses.iter().any(|use_record| {
+                use_record.use_id == edge.use_id
+                    && use_record.function_id.as_deref() == Some(method_id.as_str())
+                    && use_record.span.line == 6
+                    && matches!(
+                        &use_record.place,
+                        Place::Attribute { base, attr }
+                            if base == "InstanceField(Client)" && attr == "real_text_list"
+                    )
+            })
+    }));
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(method_id.as_str())
+            && matches!(
+                &use_record.place,
+                Place::Local { scope_id, name }
+                    if scope_id == &method_scope_id && name == "processed_text"
+            )
+    }));
+}
+
+#[test]
+fn python_frontend_keeps_imported_global_receivers_global_for_mutating_calls() {
+    let cache = parse_python(
+        r#"
+import os
+
+class ReportGenerator:
+    def delete_report(self, filename):
+        file_path = os.path.join(self.reports_dir, filename)
+        os.remove(file_path)
+"#,
+    );
+
+    let method = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "ReportGenerator.delete_report")
+        .unwrap();
+    let module = cache.modules.first().unwrap();
+
+    assert!(cache.definitions.iter().any(|definition| {
+        definition.function_id.as_deref() == Some(method.function_id.as_str())
+            && definition.def_kind == "mut-call"
+            && definition.span.line == 7
+            && matches!(
+                &definition.place,
+                Place::Global { module_id, name }
+                    if module_id == &module.module_id && name == "os"
+            )
+    }));
+
+    assert!(!cache.definitions.iter().any(|definition| {
+        definition.function_id.as_deref() == Some(method.function_id.as_str())
+            && definition.def_kind == "mut-call"
+            && definition.span.line == 7
+            && matches!(
+                &definition.place,
+                Place::Local { scope_id, name }
+                    if scope_id == &method.scope_id && name == "os"
+            )
+    }));
+}
+
+#[test]
+fn python_frontend_omits_argument_bearing_method_calls_but_keeps_zero_arg_calls() {
+    let cache = parse_python(
+        r#"
+def handle(handle_result, old, new):
+    changed = handle_result.replace(old, new)
+    cleaned = handle_result.strip()
+"#,
+    );
+
+    let function = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "handle")
+        .unwrap();
+    let function_id = function.function_id.clone();
+    let function_scope_id = function.scope_id.clone();
+
+    assert!(!cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(function_id.as_str())
+            && use_record.span.line == 3
+            && matches!(
+                &use_record.place,
+                Place::Attribute { base, attr } if base == "handle_result" && attr == "replace"
+            )
+    }));
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(function_id.as_str())
+            && use_record.span.line == 3
+            && matches!(
+                &use_record.place,
+                Place::Local { scope_id, name }
+                    if scope_id == &function_scope_id && name == "handle_result"
+            )
+    }));
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(function_id.as_str())
+            && use_record.span.line == 3
+            && matches!(
+                &use_record.place,
+                Place::Local { scope_id, name }
+                    if scope_id == &function_scope_id && name == "old"
+            )
+    }));
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(function_id.as_str())
+            && use_record.span.line == 3
+            && matches!(
+                &use_record.place,
+                Place::Local { scope_id, name }
+                    if scope_id == &function_scope_id && name == "new"
+            )
+    }));
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(function_id.as_str())
+            && use_record.span.line == 4
+            && matches!(
+                &use_record.place,
+                Place::Attribute { base, attr } if base == "handle_result" && attr == "strip"
+            )
+    }));
+}
+
+#[test]
+fn python_frontend_omits_zero_arg_method_calls_on_complex_receivers() {
+    let cache = parse_python(
+        r#"
+def summarize(task):
+    total_duration = (task.completed_at - task.started_at).total_seconds()
+"#,
+    );
+
+    let function = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "summarize")
+        .unwrap();
+    let function_id = function.function_id.clone();
+
+    assert!(!cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(function_id.as_str())
+            && use_record.span.line == 3
+            && matches!(
+                &use_record.place,
+                Place::Attribute { base, attr } if base == "*" && attr == "total_seconds"
+            )
+    }));
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(function_id.as_str())
+            && use_record.span.line == 3
+            && matches!(
+                &use_record.place,
+                Place::Attribute { base, attr }
+                    if base == "task" && attr == "completed_at"
+            )
+    }));
+
+    assert!(cache.uses.iter().any(|use_record| {
+        use_record.function_id.as_deref() == Some(function_id.as_str())
+            && use_record.span.line == 3
+            && matches!(
+                &use_record.place,
+                Place::Attribute { base, attr }
+                    if base == "task" && attr == "started_at"
             )
     }));
 }

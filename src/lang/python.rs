@@ -105,6 +105,7 @@ impl PythonFrontend {
             "class_definition" => self.lower_class(cache, ctx, node),
             "function_definition" => self.lower_function(cache, ctx, node),
             "assignment" => self.lower_assignment(cache, ctx, node),
+            "expression_statement" => self.lower_expression_statement(cache, ctx, node),
             "return_statement" => self.lower_return(cache, ctx, node),
             _ => {
                 let mut cursor = node.walk();
@@ -493,11 +494,18 @@ impl PythonFrontend {
         let mut deps = Vec::new();
 
         if let Some(value) = right {
-            for use_node in expression_uses(value) {
-                if let Some(dep) = self.lower_identifier_use(cache, ctx, use_node, "assign:rhs") {
+            for use_spec in expression_uses(value) {
+                if let Some(dep) = self.lower_identifier_use(
+                    cache,
+                    ctx,
+                    use_spec.node,
+                    use_spec.use_kind,
+                    "assign:rhs",
+                ) {
                     deps.push(dep);
                 }
             }
+            self.lower_expression_effects(cache, ctx, value);
         }
 
         for target in targets {
@@ -540,10 +548,139 @@ impl PythonFrontend {
     ) {
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            for use_node in expression_uses(child) {
-                self.lower_identifier_use(cache, ctx, use_node, "return value");
+            for use_spec in expression_uses(child) {
+                self.lower_identifier_use(
+                    cache,
+                    ctx,
+                    use_spec.node,
+                    use_spec.use_kind,
+                    "return value",
+                );
+            }
+            self.lower_expression_effects(cache, ctx, child);
+        }
+    }
+
+    fn lower_expression_statement(
+        &self,
+        cache: &mut AnalysisCache,
+        ctx: &mut LoweringContext<'_>,
+        node: Node<'_>,
+    ) {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == "assignment" {
+                self.walk(cache, ctx, child);
+                continue;
+            }
+            for use_spec in expression_uses(child) {
+                self.lower_identifier_use(
+                    cache,
+                    ctx,
+                    use_spec.node,
+                    use_spec.use_kind,
+                    "expr:statement",
+                );
+            }
+            self.lower_expression_effects(cache, ctx, child);
+        }
+    }
+
+    fn lower_expression_effects(
+        &self,
+        cache: &mut AnalysisCache,
+        ctx: &mut LoweringContext<'_>,
+        node: Node<'_>,
+    ) {
+        if node.kind() == "call" {
+            self.lower_mutating_receiver_call_definition(cache, ctx, node);
+        }
+
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            self.lower_expression_effects(cache, ctx, child);
+        }
+    }
+
+    fn lower_mutating_receiver_call_definition(
+        &self,
+        cache: &mut AnalysisCache,
+        ctx: &mut LoweringContext<'_>,
+        node: Node<'_>,
+    ) {
+        let Some(function) = node.child_by_field_name("function") else {
+            return;
+        };
+        if function.kind() != "attribute" {
+            return;
+        }
+
+        let Some(method_node) = function.child_by_field_name("attribute") else {
+            return;
+        };
+        let method_name = self.node_text(ctx.source, method_node);
+        if !is_mutating_receiver_method(&method_name) {
+            return;
+        }
+
+        let Some(receiver) = function.child_by_field_name("object") else {
+            return;
+        };
+        // A mutating receiver call mutates the resolved receiver binding rather than
+        // rebinding a fresh assignment target, so preserve the receiver's actual scope.
+        let Some(place) = self.use_place_for_node(ctx, receiver) else {
+            return;
+        };
+
+        let receiver_text = self.node_text(ctx.source, receiver);
+        let location = format!(
+            "{}:{}",
+            receiver.start_position().row + 1,
+            receiver.start_position().column + 1
+        );
+        let mut deps = Vec::new();
+        if let Some(receiver_place) = self.use_place_for_node(ctx, receiver) {
+            deps.push(receiver_place);
+        }
+
+        if let Some(arguments) = node.child_by_field_name("arguments") {
+            let mut cursor = arguments.walk();
+            for child in arguments.named_children(&mut cursor) {
+                for use_spec in expression_uses(child) {
+                    let Some(dep) = self.use_place_for_node(ctx, use_spec.node) else {
+                        continue;
+                    };
+                    if !deps.contains(&dep) {
+                        deps.push(dep);
+                    }
+                }
             }
         }
+
+        let mut span = self.span(ctx.file, ctx.source, node);
+        span.col = receiver.start_position().column + 1;
+        span.snippet = format!("{receiver_text} = <mutated by {method_name}>");
+
+        cache.definitions.push(Definition {
+            def_id: stable_id(
+                "D",
+                SCHEMA_VERSION,
+                &[
+                    &ctx.file.relative_path,
+                    &receiver_text,
+                    &location,
+                    "mut-call",
+                    &method_name,
+                ],
+            ),
+            place,
+            def_kind: "mut-call".to_string(),
+            scope_id: ctx.current_scope_id().to_string(),
+            function_id: ctx.current_function_id().map(str::to_string),
+            span,
+            expr: self.node_text(ctx.source, node),
+            deps,
+        });
     }
 
     fn lower_identifier_use(
@@ -551,6 +688,7 @@ impl PythonFrontend {
         cache: &mut AnalysisCache,
         ctx: &LoweringContext<'_>,
         node: Node<'_>,
+        use_kind: &str,
         context: &str,
     ) -> Option<Place> {
         let place = self.use_place_for_node(ctx, node)?;
@@ -567,7 +705,7 @@ impl PythonFrontend {
                 &[&ctx.file.relative_path, &label, &location, context],
             ),
             place: place.clone(),
-            use_kind: "load".to_string(),
+            use_kind: use_kind.to_string(),
             scope_id: ctx.current_scope_id().to_string(),
             function_id: ctx.current_function_id().map(str::to_string),
             span: self.span(ctx.file, ctx.source, node),
@@ -1346,15 +1484,102 @@ fn collect_binding_target_nodes<'tree>(node: Node<'tree>, targets: &mut Vec<Node
     }
 }
 
-fn expression_uses(node: Node<'_>) -> Vec<Node<'_>> {
+#[derive(Clone, Copy)]
+struct ExpressionUseSpec<'tree> {
+    node: Node<'tree>,
+    use_kind: &'static str,
+}
+
+fn expression_uses(node: Node<'_>) -> Vec<ExpressionUseSpec<'_>> {
     let mut nodes = Vec::new();
     collect_expression_uses(node, &mut nodes);
     nodes
 }
 
-fn collect_expression_uses<'tree>(node: Node<'tree>, nodes: &mut Vec<Node<'tree>>) {
+fn is_mutating_receiver_method(name: &str) -> bool {
+    matches!(
+        name,
+        "append"
+            | "appendleft"
+            | "extend"
+            | "extendleft"
+            | "insert"
+            | "remove"
+            | "pop"
+            | "popleft"
+            | "clear"
+            | "sort"
+            | "reverse"
+            | "add"
+            | "discard"
+            | "update"
+            | "setdefault"
+            | "popitem"
+            | "put"
+    )
+}
+
+fn collect_expression_uses<'tree>(node: Node<'tree>, nodes: &mut Vec<ExpressionUseSpec<'tree>>) {
     match node.kind() {
-        "identifier" | "attribute" | "subscript" => nodes.push(node),
+        "identifier" | "attribute" => nodes.push(ExpressionUseSpec {
+            node,
+            use_kind: "load",
+        }),
+        "subscript" => {
+            nodes.push(ExpressionUseSpec {
+                node,
+                use_kind: "load",
+            });
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect_expression_uses(child, nodes);
+            }
+        }
+        "call" => {
+            let function = node.child_by_field_name("function");
+            let has_arguments = node
+                .child_by_field_name("arguments")
+                .map(|arguments| arguments.named_child_count() > 0)
+                .unwrap_or(false);
+            if let Some(function) = function {
+                if matches!(function.kind(), "attribute" | "subscript") {
+                    let receiver = if function.kind() == "attribute" {
+                        function.child_by_field_name("object")
+                    } else {
+                        function.child_by_field_name("value")
+                    };
+
+                    if has_arguments {
+                        if let Some(receiver) = receiver {
+                            collect_expression_uses(receiver, nodes);
+                        }
+                        if let Some(arguments) = node.child_by_field_name("arguments") {
+                            let mut cursor = arguments.walk();
+                            for child in arguments.named_children(&mut cursor) {
+                                collect_expression_uses(child, nodes);
+                            }
+                        }
+                        return;
+                    }
+
+                    if let Some(receiver) = receiver {
+                        if receiver.kind() == "identifier" {
+                            nodes.push(ExpressionUseSpec {
+                                node: function,
+                                use_kind: "call-zero-arg",
+                            });
+                        } else {
+                            collect_expression_uses(receiver, nodes);
+                        }
+                        return;
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect_expression_uses(child, nodes);
+            }
+        }
         _ => {
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
