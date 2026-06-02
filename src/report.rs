@@ -280,24 +280,13 @@ fn write_graphs(
             top_n: Some(top_n),
         },
         GraphSpec {
-            name: "Module dependencies",
-            stem: "module_dependencies",
-            writer: GraphWriter::ModuleDependencies,
-            top_n: None,
-        },
-        GraphSpec {
-            name: "Function dependencies",
-            stem: "function_dependencies",
-            writer: GraphWriter::FunctionDependencies,
-            top_n: None,
-        },
-        GraphSpec {
             name: "Variable dependencies",
             stem: "variable_dependencies",
             writer: GraphWriter::VariableDependencies,
             top_n: Some(top_n),
         },
     ];
+    remove_stale_graph_artifacts(graph_dir, &specs)?;
     let mut generated = Vec::new();
 
     for spec in specs {
@@ -306,12 +295,6 @@ fn write_graphs(
         match spec.writer {
             GraphWriter::DefUseHotspots => {
                 graph::write_def_use_hotspots_dot(cache, &dot_path, spec.top_n.unwrap_or(top_n))?
-            }
-            GraphWriter::ModuleDependencies => {
-                graph::write_module_dependency_dot(cache, &dot_path)?
-            }
-            GraphWriter::FunctionDependencies => {
-                graph::write_function_dependency_dot(cache, &dot_path)?
             }
             GraphWriter::VariableDependencies => {
                 graph::write_var_dependency_dot(cache, &dot_path, spec.top_n.unwrap_or(top_n))?
@@ -326,6 +309,31 @@ fn write_graphs(
     }
 
     Ok(generated)
+}
+
+fn remove_stale_graph_artifacts(graph_dir: &Path, active_specs: &[GraphSpec]) -> Result<()> {
+    const KNOWN_GRAPH_STEMS: &[&str] = &[
+        "def_use_hotspots",
+        "variable_dependencies",
+        "module_dependencies",
+        "function_dependencies",
+    ];
+
+    for stem in KNOWN_GRAPH_STEMS {
+        if active_specs.iter().any(|spec| spec.stem == *stem) {
+            continue;
+        }
+
+        for ext in ["dot", "svg"] {
+            let path = graph_dir.join(format!("{stem}.{ext}"));
+            if path.exists() {
+                fs::remove_file(&path)
+                    .with_context(|| format!("failed to remove stale graph {}", path.display()))?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn write_index(cache: &AnalysisCache, out: &Path, graphs: &[GeneratedGraph]) -> Result<()> {
@@ -539,8 +547,6 @@ struct GraphSpec {
 #[derive(Debug, Clone, Copy)]
 enum GraphWriter {
     DefUseHotspots,
-    ModuleDependencies,
-    FunctionDependencies,
     VariableDependencies,
 }
 
