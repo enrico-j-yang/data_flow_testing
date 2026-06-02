@@ -1,5 +1,7 @@
-use crate::ir::{AnalysisCache, Place};
+use crate::ids::stable_id;
+use crate::ir::{AnalysisCache, Place, SCHEMA_VERSION};
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -158,9 +160,237 @@ fn collect_reachable_traversal_nodes<R>(
     visited
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RenderGraphDocument {
+    schema_version: u32,
+    graph_kind: String,
+    nodes: Vec<RenderGraphNode>,
+    edges: Vec<RenderGraphEdge>,
+    views: Vec<RenderGraphView>,
+    paths: Vec<RenderGraphPath>,
+    stats: RenderGraphStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RenderGraphNode {
+    id: String,
+    kind: String,
+    module: String,
+    function: Option<String>,
+    variable: String,
+    line: usize,
+    col: usize,
+    place_kind: String,
+    scope_id: Option<String>,
+    function_id: Option<String>,
+    label: String,
+    tooltip: String,
+    snippet: Option<String>,
+    span: RenderSourceSpan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RenderGraphEdge {
+    id: String,
+    from: String,
+    to: String,
+    kind: String,
+    label: String,
+    color: Option<String>,
+    style: Option<String>,
+    dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RenderGraphView {
+    id: String,
+    title: String,
+    node_ids: Vec<String>,
+    edge_ids: Vec<String>,
+    root_node_ids: Vec<String>,
+    path_ids: Vec<String>,
+    clusters: Vec<RenderGraphCluster>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RenderGraphCluster {
+    id: String,
+    label: String,
+    node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RenderGraphPath {
+    id: String,
+    root_node_id: String,
+    node_ids: Vec<String>,
+    edge_ids: Vec<String>,
+    path_len: usize,
+    max_fan_in: usize,
+    max_fan_out: usize,
+    score_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RenderGraphStats {
+    node_count: usize,
+    edge_count: usize,
+    def_count: usize,
+    use_count: usize,
+    root_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RenderSourceSpan {
+    file: String,
+    line: usize,
+    col: usize,
+    end_line: usize,
+    end_col: usize,
+}
+
+struct VarDependencyGraphParts {
+    nodes: BTreeMap<String, DefUseNodeRecord>,
+    edges: BTreeSet<(String, String, String)>,
+    root_node_ids: BTreeSet<String>,
+}
+
+struct HotspotGraphParts {
+    nodes: BTreeMap<String, DefUseNodeRecord>,
+    edges: BTreeSet<HotspotEdgeSpec>,
+    root_node_ids: BTreeSet<String>,
+    paths: Vec<HotspotPathCandidate>,
+}
+
 pub fn write_def_use_hotspots_dot(cache: &AnalysisCache, path: &Path, top_n: usize) -> Result<()> {
-    let mut text =
-        String::from("digraph DefUseHotspots {\n  rankdir=LR;\n  node [shape=box, fontsize=10];\n");
+    let document = build_def_use_hotspot_graph_document(cache, top_n);
+    write_dot(path, &render_def_use_hotspot_dot(&document))
+}
+
+pub fn write_def_use_hotspots_graph_json(
+    cache: &AnalysisCache,
+    path: &Path,
+    top_n: usize,
+) -> Result<()> {
+    let document = build_def_use_hotspot_graph_document(cache, top_n);
+    let json = serde_json::to_string_pretty(&document)?;
+    fs::write(path, json).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn build_def_use_hotspot_graph_document(
+    cache: &AnalysisCache,
+    top_n: usize,
+) -> RenderGraphDocument {
+    let parts = collect_def_use_hotspot_graph_parts(cache, top_n);
+    let labels = PlaceLabelContext::new(cache);
+    let scope_owner_ids = cache
+        .scopes
+        .iter()
+        .map(|scope| (scope.scope_id.clone(), scope.owner_id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let functions_by_id = cache
+        .functions
+        .iter()
+        .map(|function| (function.function_id.clone(), function))
+        .collect::<BTreeMap<_, _>>();
+    let modules_by_id = cache
+        .modules
+        .iter()
+        .map(|module| (module.module_id.clone(), module))
+        .collect::<BTreeMap<_, _>>();
+    let scope_module_ids = scope_module_ids(cache);
+    let node_labels = build_render_graph_node_labels(&parts.nodes, &labels);
+
+    let mut render_nodes = parts
+        .nodes
+        .iter()
+        .map(|(node_id, record)| {
+            let label = node_labels.get(node_id).cloned().unwrap_or_default();
+            build_render_graph_node(
+                node_id,
+                record,
+                &label,
+                &labels,
+                &scope_owner_ids,
+                &functions_by_id,
+                &modules_by_id,
+                &scope_module_ids,
+            )
+        })
+        .collect::<Vec<_>>();
+    render_nodes.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let mut render_edges = parts
+        .edges
+        .iter()
+        .map(build_hotspot_render_graph_edge)
+        .collect::<Vec<_>>();
+    render_edges.sort_by(|left, right| {
+        left.from
+            .cmp(&right.from)
+            .then_with(|| left.to.cmp(&right.to))
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
+
+    let node_ids = render_nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    let node_id_set = node_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let edge_ids = render_edges
+        .iter()
+        .map(|edge| edge.id.clone())
+        .collect::<Vec<_>>();
+    let root_node_ids = parts
+        .root_node_ids
+        .iter()
+        .filter(|node_id| node_id_set.contains(*node_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let clusters = build_render_graph_clusters(
+        &render_nodes,
+        &labels,
+        &scope_owner_ids,
+        &functions_by_id,
+        &modules_by_id,
+        &scope_module_ids,
+    );
+    let paths = build_hotspot_render_graph_paths(&parts.paths, &render_edges);
+    let path_ids = paths.iter().map(|path| path.id.clone()).collect::<Vec<_>>();
+    let stats = RenderGraphStats {
+        node_count: render_nodes.len(),
+        edge_count: render_edges.len(),
+        def_count: render_nodes
+            .iter()
+            .filter(|node| node.kind == "def")
+            .count(),
+        use_count: render_nodes
+            .iter()
+            .filter(|node| node.kind == "use")
+            .count(),
+        root_count: root_node_ids.len(),
+    };
+
+    RenderGraphDocument {
+        schema_version: SCHEMA_VERSION,
+        graph_kind: "DefUseHotspots".to_string(),
+        nodes: render_nodes,
+        edges: render_edges,
+        views: vec![RenderGraphView {
+            id: "def_use_hotspots".to_string(),
+            title: "Def-use hotspots".to_string(),
+            node_ids,
+            edge_ids,
+            root_node_ids,
+            path_ids,
+            clusters,
+        }],
+        paths,
+        stats,
+    }
+}
+
+fn collect_def_use_hotspot_graph_parts(cache: &AnalysisCache, top_n: usize) -> HotspotGraphParts {
     let mut nodes = BTreeMap::new();
     let mut edges = BTreeSet::new();
     let definitions_by_id = cache
@@ -173,31 +403,32 @@ pub fn write_def_use_hotspots_dot(cache: &AnalysisCache, path: &Path, top_n: usi
         .iter()
         .map(|use_site| (use_site.use_id.clone(), use_site))
         .collect::<BTreeMap<_, _>>();
+    let selected_paths = select_hotspot_seed_paths(cache, top_n);
 
-    for selected_path in select_hotspot_seed_paths(cache, top_n) {
-        for node in selected_path.node_sequence {
+    for selected_path in &selected_paths {
+        for node in &selected_path.node_sequence {
             match node {
                 HotspotTraversalNode::Def(def_id) => {
-                    let Some(definition) = definitions_by_id.get(&def_id) else {
+                    let Some(definition) = definitions_by_id.get(def_id) else {
                         continue;
                     };
                     nodes
-                        .entry(def_id)
+                        .entry(def_id.clone())
                         .or_insert_with(|| DefUseNodeRecord::definition(definition));
                 }
                 HotspotTraversalNode::Use(use_id) => {
-                    let Some(use_site) = uses_by_id.get(&use_id) else {
+                    let Some(use_site) = uses_by_id.get(use_id) else {
                         continue;
                     };
                     nodes
-                        .entry(use_id)
+                        .entry(use_id.clone())
                         .or_insert_with(|| DefUseNodeRecord::usage(use_site));
                 }
             }
         }
 
-        for edge in selected_path.render_edges {
-            edges.insert(edge);
+        for edge in &selected_path.render_edges {
+            edges.insert(edge.clone());
         }
     }
 
@@ -221,36 +452,6 @@ pub fn write_def_use_hotspots_dot(cache: &AnalysisCache, path: &Path, top_n: usi
         edges.insert(inferred_edge);
     }
 
-    let labels = PlaceLabelContext::new(cache);
-    let mut short_label_counts = BTreeMap::new();
-    for record in nodes.values() {
-        *short_label_counts
-            .entry(record.base_label(&labels))
-            .or_insert(0usize) += 1;
-    }
-
-    let mut node_labels = BTreeMap::new();
-    for (node_id, record) in &nodes {
-        let base_label = record.base_label(&labels);
-        let short_label = record.short_label(&labels);
-        let label = if short_label_counts
-            .get(&base_label)
-            .copied()
-            .unwrap_or_default()
-            > 1
-        {
-            record.disambiguated_label(&labels)
-        } else {
-            short_label
-        };
-        node_labels.insert(node_id.clone(), label);
-    }
-
-    let mut final_label_counts = BTreeMap::new();
-    for label in node_labels.values() {
-        *final_label_counts.entry(label.clone()).or_insert(0usize) += 1;
-    }
-
     let mut line_groups = BTreeMap::<(String, usize), (Vec<String>, Vec<String>)>::new();
 
     for (node_id, record) in &nodes {
@@ -267,18 +468,6 @@ pub fn write_def_use_hotspots_dot(cache: &AnalysisCache, path: &Path, top_n: usi
                 _ => {}
             }
         }
-    }
-
-    for (node_id, record) in nodes {
-        let mut label = node_labels.get(&node_id).cloned().unwrap_or_default();
-        if final_label_counts.get(&label).copied().unwrap_or_default() > 1 {
-            label = record.fully_disambiguated_label(&labels);
-        }
-        text.push_str(&format!(
-            "  \"{}\" [label=\"{}\"];\n",
-            dot_label(&node_id),
-            dot_label(&label)
-        ));
     }
 
     for ((_, _), (def_ids, use_ids)) in line_groups {
@@ -303,23 +492,15 @@ pub fn write_def_use_hotspots_dot(cache: &AnalysisCache, path: &Path, top_n: usi
         }
     }
 
-    for edge in edges {
-        let extra_attrs = match edge.kind {
-            HotspotEdgeKind::Local => String::new(),
-            HotspotEdgeKind::CallArg => ", style=dashed, color=\"steelblue3\"".to_string(),
-            HotspotEdgeKind::SameLine => ", style=dashed, color=\"gray60\", dir=none".to_string(),
-        };
-        text.push_str(&format!(
-            "  \"{}\" -> \"{}\" [label=\"{}\"{}];\n",
-            dot_label(&edge.def_id),
-            dot_label(&edge.use_id),
-            dot_label(&edge.label),
-            extra_attrs
-        ));
+    HotspotGraphParts {
+        nodes,
+        edges,
+        root_node_ids: selected_paths
+            .iter()
+            .map(|path| path.root_def_id.clone())
+            .collect(),
+        paths: selected_paths,
     }
-
-    text.push_str("}\n");
-    write_dot(path, &text)
 }
 
 fn select_hotspot_seed_paths(cache: &AnalysisCache, top_n: usize) -> Vec<HotspotPathCandidate> {
@@ -1247,10 +1428,199 @@ fn is_assignment_callee_edge(
     expr.starts_with(snippet) && expr[snippet.len()..].trim_start().starts_with('(')
 }
 
-pub fn write_var_dependency_dot(cache: &AnalysisCache, path: &Path, _top_n: usize) -> Result<()> {
-    let mut text = String::from(
-        "digraph VariableDependencies {\n  rankdir=LR;\n  node [shape=box, fontsize=10];\n",
+pub fn write_var_dependency_dot(cache: &AnalysisCache, path: &Path, top_n: usize) -> Result<()> {
+    let document = build_var_dependency_graph_document(cache, top_n);
+    write_dot(path, &render_var_dependency_dot(&document))
+}
+
+pub fn write_var_dependency_graph_json(
+    cache: &AnalysisCache,
+    path: &Path,
+    top_n: usize,
+) -> Result<()> {
+    let document = build_var_dependency_graph_document(cache, top_n);
+    let json = serde_json::to_string_pretty(&document)?;
+    fs::write(path, json).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn build_var_dependency_graph_document(
+    cache: &AnalysisCache,
+    _top_n: usize,
+) -> RenderGraphDocument {
+    let parts = collect_var_dependency_graph_parts(cache);
+    let labels = PlaceLabelContext::new(cache);
+    let scope_owner_ids = cache
+        .scopes
+        .iter()
+        .map(|scope| (scope.scope_id.clone(), scope.owner_id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let functions_by_id = cache
+        .functions
+        .iter()
+        .map(|function| (function.function_id.clone(), function))
+        .collect::<BTreeMap<_, _>>();
+    let modules_by_id = cache
+        .modules
+        .iter()
+        .map(|module| (module.module_id.clone(), module))
+        .collect::<BTreeMap<_, _>>();
+    let class_module_ids = cache
+        .classes
+        .iter()
+        .map(|class_record| {
+            (
+                class_record.class_id.clone(),
+                class_record.module_id.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let function_module_ids = cache
+        .functions
+        .iter()
+        .map(|function| (function.function_id.clone(), function.module_id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let module_ids = cache
+        .modules
+        .iter()
+        .map(|module_record| module_record.module_id.clone())
+        .collect::<BTreeSet<_>>();
+    let scope_module_ids =
+        cache
+            .scopes
+            .iter()
+            .fold(BTreeMap::<String, String>::new(), |mut map, scope| {
+                if module_ids.contains(&scope.owner_id) {
+                    map.insert(scope.scope_id.clone(), scope.owner_id.clone());
+                } else if let Some(module_id) = function_module_ids.get(&scope.owner_id) {
+                    map.insert(scope.scope_id.clone(), module_id.clone());
+                } else if let Some(module_id) = class_module_ids.get(&scope.owner_id) {
+                    map.insert(scope.scope_id.clone(), module_id.clone());
+                }
+                map
+            });
+
+    let mut short_label_counts = BTreeMap::new();
+    for record in parts.nodes.values() {
+        *short_label_counts
+            .entry(record.base_label(&labels))
+            .or_insert(0usize) += 1;
+    }
+
+    let mut node_labels = BTreeMap::new();
+    for (node_id, record) in &parts.nodes {
+        let base_label = record.base_label(&labels);
+        let short_label = record.short_label(&labels);
+        let label = if short_label_counts
+            .get(&base_label)
+            .copied()
+            .unwrap_or_default()
+            > 1
+        {
+            record.disambiguated_label(&labels)
+        } else {
+            short_label
+        };
+        node_labels.insert(node_id.clone(), label);
+    }
+
+    let mut final_label_counts = BTreeMap::new();
+    for label in node_labels.values() {
+        *final_label_counts.entry(label.clone()).or_insert(0usize) += 1;
+    }
+
+    let mut render_nodes = parts
+        .nodes
+        .iter()
+        .map(|(node_id, record)| {
+            let mut label = node_labels.get(node_id).cloned().unwrap_or_default();
+            if final_label_counts.get(&label).copied().unwrap_or_default() > 1 {
+                label = record.fully_disambiguated_label(&labels);
+            }
+            build_render_graph_node(
+                node_id,
+                record,
+                &label,
+                &labels,
+                &scope_owner_ids,
+                &functions_by_id,
+                &modules_by_id,
+                &scope_module_ids,
+            )
+        })
+        .collect::<Vec<_>>();
+    render_nodes.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let mut render_edges = parts
+        .edges
+        .iter()
+        .map(|(from, to, kind)| build_render_graph_edge(from, to, kind))
+        .collect::<Vec<_>>();
+    render_edges.sort_by(|left, right| {
+        left.from
+            .cmp(&right.from)
+            .then_with(|| left.to.cmp(&right.to))
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
+
+    let node_ids = render_nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    let node_id_set = node_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let edge_ids = render_edges
+        .iter()
+        .map(|edge| edge.id.clone())
+        .collect::<Vec<_>>();
+    let root_node_ids = parts
+        .root_node_ids
+        .iter()
+        .filter(|node_id| node_id_set.contains(*node_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let clusters = build_render_graph_clusters(
+        &render_nodes,
+        &labels,
+        &scope_owner_ids,
+        &functions_by_id,
+        &modules_by_id,
+        &scope_module_ids,
     );
+    let paths = build_var_dependency_render_graph_paths(&root_node_ids, &render_edges);
+    let path_ids = paths.iter().map(|path| path.id.clone()).collect::<Vec<_>>();
+    let stats = RenderGraphStats {
+        node_count: render_nodes.len(),
+        edge_count: render_edges.len(),
+        def_count: render_nodes
+            .iter()
+            .filter(|node| node.kind == "def")
+            .count(),
+        use_count: render_nodes
+            .iter()
+            .filter(|node| node.kind == "use")
+            .count(),
+        root_count: root_node_ids.len(),
+    };
+
+    RenderGraphDocument {
+        schema_version: SCHEMA_VERSION,
+        graph_kind: "VariableDependencies".to_string(),
+        nodes: render_nodes,
+        edges: render_edges,
+        views: vec![RenderGraphView {
+            id: "variable_dependencies".to_string(),
+            title: "Variable dependencies".to_string(),
+            node_ids,
+            edge_ids,
+            root_node_ids,
+            path_ids,
+            clusters,
+        }],
+        paths,
+        stats,
+    }
+}
+
+fn collect_var_dependency_graph_parts(cache: &AnalysisCache) -> VarDependencyGraphParts {
     let mut nodes = BTreeMap::new();
     let mut edges = BTreeSet::new();
     let definitions_by_id = cache
@@ -1688,25 +2058,193 @@ pub fn write_var_dependency_dot(cache: &AnalysisCache, path: &Path, _top_n: usiz
         }
     }
 
-    let labels = PlaceLabelContext::new(cache);
+    VarDependencyGraphParts {
+        nodes,
+        edges,
+        root_node_ids: root_target_ids
+            .into_iter()
+            .map(TraversalNode::Def)
+            .filter_map(|node| match node {
+                TraversalNode::Def(def_id) if selected_target_ids.contains(&def_id) => Some(def_id),
+                _ => None,
+            })
+            .collect(),
+    }
+}
+
+fn render_var_dependency_dot(document: &RenderGraphDocument) -> String {
+    let mut text = String::from(
+        "digraph VariableDependencies {\n  rankdir=LR;\n  node [shape=box, fontsize=10];\n",
+    );
+
+    for node in &document.nodes {
+        text.push_str(&format!(
+            "  \"{}\" [label=\"{}\"];\n",
+            dot_label(&node.id),
+            dot_label(&node.label)
+        ));
+    }
+
+    for edge in &document.edges {
+        let extra_attrs = edge_dot_attributes(edge);
+        text.push_str(&format!(
+            "  \"{}\" -> \"{}\" [label=\"{}\"{}];\n",
+            dot_label(&edge.from),
+            dot_label(&edge.to),
+            dot_label(&edge.label),
+            extra_attrs
+        ));
+    }
+
+    text.push_str("}\n");
+    text
+}
+
+fn render_def_use_hotspot_dot(document: &RenderGraphDocument) -> String {
+    let mut text =
+        String::from("digraph DefUseHotspots {\n  rankdir=LR;\n  node [shape=box, fontsize=10];\n");
+
+    for node in &document.nodes {
+        text.push_str(&format!(
+            "  \"{}\" [label=\"{}\"];\n",
+            dot_label(&node.id),
+            dot_label(&node.label)
+        ));
+    }
+
+    for edge in &document.edges {
+        let extra_attrs = edge_dot_attributes(edge);
+        text.push_str(&format!(
+            "  \"{}\" -> \"{}\" [label=\"{}\"{}];\n",
+            dot_label(&edge.from),
+            dot_label(&edge.to),
+            dot_label(&edge.label),
+            extra_attrs
+        ));
+    }
+
+    text.push_str("}\n");
+    text
+}
+
+fn build_render_graph_node(
+    node_id: &str,
+    record: &DefUseNodeRecord,
+    label: &str,
+    labels: &PlaceLabelContext,
+    scope_owner_ids: &BTreeMap<String, String>,
+    functions_by_id: &BTreeMap<String, &crate::ir::FunctionRecord>,
+    modules_by_id: &BTreeMap<String, &crate::ir::ModuleRecord>,
+    scope_module_ids: &BTreeMap<String, String>,
+) -> RenderGraphNode {
+    let function_id = record
+        .scope_id
+        .as_ref()
+        .and_then(|scope_id| scope_owner_ids.get(scope_id))
+        .filter(|owner_id| functions_by_id.contains_key(*owner_id))
+        .cloned();
+    let function = function_id
+        .as_ref()
+        .and_then(|function_id| functions_by_id.get(function_id))
+        .map(|function| function.qualified_name.clone());
+    let module = record
+        .scope_id
+        .as_ref()
+        .and_then(|scope_id| scope_module_ids.get(scope_id))
+        .and_then(|module_id| modules_by_id.get(module_id))
+        .map(|module| module.module_name.clone())
+        .or_else(|| match &record.place {
+            Place::Global { module_id, .. } => modules_by_id
+                .get(module_id)
+                .map(|module| module.module_name.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let snippet = (!record.snippet.trim().is_empty()).then(|| record.snippet.clone());
+
+    RenderGraphNode {
+        id: node_id.to_string(),
+        kind: record.role.to_string(),
+        module,
+        function,
+        variable: render_graph_variable_name(record, labels),
+        line: record.line,
+        col: record.col,
+        place_kind: place_kind_name(&record.place).to_string(),
+        scope_id: record.scope_id.clone(),
+        function_id,
+        label: label.to_string(),
+        tooltip: build_graph_node_tooltip(record, label),
+        snippet,
+        span: RenderSourceSpan {
+            file: record.file.clone(),
+            line: record.line,
+            col: record.col,
+            end_line: record.line,
+            end_col: record.col,
+        },
+    }
+}
+
+fn scope_module_ids(cache: &AnalysisCache) -> BTreeMap<String, String> {
+    let function_module_ids = cache
+        .functions
+        .iter()
+        .map(|function| (function.function_id.clone(), function.module_id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let class_module_ids = cache
+        .classes
+        .iter()
+        .map(|class_record| {
+            (
+                class_record.class_id.clone(),
+                class_record.module_id.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let module_ids = cache
+        .modules
+        .iter()
+        .map(|module_record| module_record.module_id.clone())
+        .collect::<BTreeSet<_>>();
+
+    cache
+        .scopes
+        .iter()
+        .fold(BTreeMap::<String, String>::new(), |mut map, scope| {
+            if module_ids.contains(&scope.owner_id) {
+                map.insert(scope.scope_id.clone(), scope.owner_id.clone());
+            } else if let Some(module_id) = function_module_ids.get(&scope.owner_id) {
+                map.insert(scope.scope_id.clone(), module_id.clone());
+            } else if let Some(module_id) = class_module_ids.get(&scope.owner_id) {
+                map.insert(scope.scope_id.clone(), module_id.clone());
+            }
+            map
+        })
+}
+
+fn build_render_graph_node_labels(
+    nodes: &BTreeMap<String, DefUseNodeRecord>,
+    labels: &PlaceLabelContext,
+) -> BTreeMap<String, String> {
     let mut short_label_counts = BTreeMap::new();
     for record in nodes.values() {
         *short_label_counts
-            .entry(record.base_label(&labels))
+            .entry(record.base_label(labels))
             .or_insert(0usize) += 1;
     }
 
     let mut node_labels = BTreeMap::new();
-    for (node_id, record) in &nodes {
-        let base_label = record.base_label(&labels);
-        let short_label = record.short_label(&labels);
+    for (node_id, record) in nodes {
+        let base_label = record.base_label(labels);
+        let short_label = record.short_label(labels);
         let label = if short_label_counts
             .get(&base_label)
             .copied()
             .unwrap_or_default()
             > 1
         {
-            record.disambiguated_label(&labels)
+            record.disambiguated_label(labels)
         } else {
             short_label
         };
@@ -1719,35 +2257,378 @@ pub fn write_var_dependency_dot(cache: &AnalysisCache, path: &Path, _top_n: usiz
     }
 
     for (node_id, record) in nodes {
-        let mut label = node_labels.get(&node_id).cloned().unwrap_or_default();
-        if final_label_counts.get(&label).copied().unwrap_or_default() > 1 {
-            label = record.fully_disambiguated_label(&labels);
+        if let Some(label) = node_labels.get_mut(node_id) {
+            if final_label_counts.get(label).copied().unwrap_or_default() > 1 {
+                *label = record.fully_disambiguated_label(labels);
+            }
         }
-        text.push_str(&format!(
-            "  \"{}\" [label=\"{}\"];\n",
-            dot_label(&node_id),
-            dot_label(&label)
-        ));
     }
 
-    for (source_node_id, target_node_id, dep_kind) in edges {
-        let extra_attrs = match dep_kind.as_str() {
-            "call-arg" => ", style=dashed, color=\"steelblue3\"".to_string(),
-            "def-use" => ", style=dotted, color=\"darkolivegreen4\"".to_string(),
-            "same-line" => ", style=dashed, color=\"gray60\"".to_string(),
-            _ => String::new(),
+    node_labels
+}
+
+fn build_render_graph_edge(from: &str, to: &str, kind: &str) -> RenderGraphEdge {
+    let (style, color, dir) = match kind {
+        "call-arg" => (
+            Some("dashed".to_string()),
+            Some("steelblue3".to_string()),
+            None,
+        ),
+        "def-use" => (
+            Some("dotted".to_string()),
+            Some("darkolivegreen4".to_string()),
+            None,
+        ),
+        "same-line" => (Some("dashed".to_string()), Some("gray60".to_string()), None),
+        _ => (None, None, None),
+    };
+
+    RenderGraphEdge {
+        id: stable_id("GE", SCHEMA_VERSION, &[from, to, kind]),
+        from: from.to_string(),
+        to: to.to_string(),
+        kind: kind.to_string(),
+        label: kind.to_string(),
+        color,
+        style,
+        dir,
+    }
+}
+
+fn build_hotspot_render_graph_edge(edge: &HotspotEdgeSpec) -> RenderGraphEdge {
+    let kind = hotspot_edge_kind_name(edge);
+    let (style, color, dir) = match edge.kind {
+        HotspotEdgeKind::Local => (None, None, None),
+        HotspotEdgeKind::CallArg => (
+            Some("dashed".to_string()),
+            Some("steelblue3".to_string()),
+            None,
+        ),
+        HotspotEdgeKind::SameLine => (
+            Some("dashed".to_string()),
+            Some("gray60".to_string()),
+            Some("none".to_string()),
+        ),
+    };
+
+    RenderGraphEdge {
+        id: stable_id("GE", SCHEMA_VERSION, &[&edge.def_id, &edge.use_id, &kind]),
+        from: edge.def_id.clone(),
+        to: edge.use_id.clone(),
+        kind,
+        label: edge.label.clone(),
+        color,
+        style,
+        dir,
+    }
+}
+
+fn hotspot_edge_kind_name(edge: &HotspotEdgeSpec) -> String {
+    match edge.kind {
+        HotspotEdgeKind::Local => {
+            if edge.label.is_empty() {
+                "local".to_string()
+            } else {
+                edge.label.clone()
+            }
+        }
+        HotspotEdgeKind::CallArg => "call-arg".to_string(),
+        HotspotEdgeKind::SameLine => "same-line".to_string(),
+    }
+}
+
+fn build_render_graph_clusters(
+    nodes: &[RenderGraphNode],
+    labels: &PlaceLabelContext,
+    scope_owner_ids: &BTreeMap<String, String>,
+    functions_by_id: &BTreeMap<String, &crate::ir::FunctionRecord>,
+    modules_by_id: &BTreeMap<String, &crate::ir::ModuleRecord>,
+    scope_module_ids: &BTreeMap<String, String>,
+) -> Vec<RenderGraphCluster> {
+    let mut clusters = BTreeMap::<String, Vec<String>>::new();
+
+    for node in nodes {
+        let Some(cluster_label) = node_cluster_label(
+            node,
+            labels,
+            scope_owner_ids,
+            functions_by_id,
+            modules_by_id,
+            scope_module_ids,
+        ) else {
+            continue;
         };
-        text.push_str(&format!(
-            "  \"{}\" -> \"{}\" [label=\"{}\"{}];\n",
-            dot_label(&source_node_id),
-            dot_label(&target_node_id),
-            dot_label(&dep_kind),
-            extra_attrs
-        ));
+        clusters
+            .entry(cluster_label)
+            .or_default()
+            .push(node.id.clone());
     }
 
-    text.push_str("}\n");
-    write_dot(path, &text)
+    clusters
+        .into_iter()
+        .map(|(label, mut node_ids)| {
+            node_ids.sort();
+            RenderGraphCluster {
+                id: stable_id("GC", SCHEMA_VERSION, &[&label]),
+                label,
+                node_ids,
+            }
+        })
+        .collect()
+}
+
+fn build_hotspot_render_graph_paths(
+    paths: &[HotspotPathCandidate],
+    edges: &[RenderGraphEdge],
+) -> Vec<RenderGraphPath> {
+    let mut incoming = BTreeMap::<String, usize>::new();
+    let mut outgoing = BTreeMap::<String, usize>::new();
+    for edge in edges {
+        *outgoing.entry(edge.from.clone()).or_insert(0) += 1;
+        *incoming.entry(edge.to.clone()).or_insert(0) += 1;
+    }
+
+    paths
+        .iter()
+        .map(|path| {
+            let node_ids = path
+                .node_sequence
+                .iter()
+                .map(|node| match node {
+                    TraversalNode::Def(def_id) => def_id.clone(),
+                    TraversalNode::Use(use_id) => use_id.clone(),
+                })
+                .collect::<Vec<_>>();
+            let edge_ids = path
+                .render_edges
+                .iter()
+                .map(|edge| build_hotspot_render_graph_edge(edge).id)
+                .collect::<Vec<_>>();
+            let max_fan_in = node_ids
+                .iter()
+                .map(|node_id| incoming.get(node_id).copied().unwrap_or_default())
+                .max()
+                .unwrap_or_default();
+            let max_fan_out = node_ids
+                .iter()
+                .map(|node_id| outgoing.get(node_id).copied().unwrap_or_default())
+                .max()
+                .unwrap_or_default();
+
+            RenderGraphPath {
+                id: stable_id("GP", SCHEMA_VERSION, &[&path.path_id]),
+                root_node_id: path.root_def_id.clone(),
+                node_ids,
+                edge_ids,
+                path_len: path.path_len,
+                max_fan_in,
+                max_fan_out,
+                score_kind: "selected".to_string(),
+            }
+        })
+        .collect()
+}
+
+fn build_var_dependency_render_graph_paths(
+    root_node_ids: &[String],
+    edges: &[RenderGraphEdge],
+) -> Vec<RenderGraphPath> {
+    let mut adjacency = BTreeMap::<String, Vec<&RenderGraphEdge>>::new();
+    let mut incoming = BTreeMap::<String, usize>::new();
+    let mut outgoing = BTreeMap::<String, usize>::new();
+
+    for edge in edges {
+        adjacency.entry(edge.from.clone()).or_default().push(edge);
+        *outgoing.entry(edge.from.clone()).or_insert(0) += 1;
+        *incoming.entry(edge.to.clone()).or_insert(0) += 1;
+    }
+
+    for edge_list in adjacency.values_mut() {
+        edge_list.sort_by(|left, right| {
+            left.to
+                .cmp(&right.to)
+                .then_with(|| left.kind.cmp(&right.kind))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+    }
+
+    let mut paths = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut node_ids = Vec::new();
+    let mut edge_ids = Vec::new();
+
+    for root_node_id in root_node_ids {
+        visit_var_dependency_render_paths(
+            root_node_id,
+            root_node_id,
+            &adjacency,
+            &incoming,
+            &outgoing,
+            &mut visited,
+            &mut node_ids,
+            &mut edge_ids,
+            &mut seen,
+            &mut paths,
+        );
+    }
+
+    paths
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_var_dependency_render_paths(
+    current_node_id: &str,
+    root_node_id: &str,
+    adjacency: &BTreeMap<String, Vec<&RenderGraphEdge>>,
+    incoming: &BTreeMap<String, usize>,
+    outgoing: &BTreeMap<String, usize>,
+    visited: &mut BTreeSet<String>,
+    node_ids: &mut Vec<String>,
+    edge_ids: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    paths: &mut Vec<RenderGraphPath>,
+) {
+    visited.insert(current_node_id.to_string());
+    node_ids.push(current_node_id.to_string());
+
+    let mut explored_child = false;
+    if let Some(next_edges) = adjacency.get(current_node_id) {
+        for edge in next_edges {
+            if visited.contains(&edge.to) {
+                continue;
+            }
+            explored_child = true;
+            edge_ids.push(edge.id.clone());
+            visit_var_dependency_render_paths(
+                &edge.to,
+                root_node_id,
+                adjacency,
+                incoming,
+                outgoing,
+                visited,
+                node_ids,
+                edge_ids,
+                seen,
+                paths,
+            );
+            edge_ids.pop();
+        }
+    }
+
+    if !explored_child {
+        let path_key = format!("{}|{}", node_ids.join("->"), edge_ids.join("->"));
+        if seen.insert(path_key) {
+            let max_fan_in = node_ids
+                .iter()
+                .map(|node_id| incoming.get(node_id).copied().unwrap_or_default())
+                .max()
+                .unwrap_or_default();
+            let max_fan_out = node_ids
+                .iter()
+                .map(|node_id| outgoing.get(node_id).copied().unwrap_or_default())
+                .max()
+                .unwrap_or_default();
+            paths.push(RenderGraphPath {
+                id: stable_id("GP", SCHEMA_VERSION, &[root_node_id, &node_ids.join("->")]),
+                root_node_id: root_node_id.to_string(),
+                node_ids: node_ids.clone(),
+                edge_ids: edge_ids.clone(),
+                path_len: node_ids.len(),
+                max_fan_in,
+                max_fan_out,
+                score_kind: "reachable".to_string(),
+            });
+        }
+    }
+
+    node_ids.pop();
+    visited.remove(current_node_id);
+}
+
+fn node_cluster_label(
+    node: &RenderGraphNode,
+    labels: &PlaceLabelContext,
+    scope_owner_ids: &BTreeMap<String, String>,
+    functions_by_id: &BTreeMap<String, &crate::ir::FunctionRecord>,
+    modules_by_id: &BTreeMap<String, &crate::ir::ModuleRecord>,
+    scope_module_ids: &BTreeMap<String, String>,
+) -> Option<String> {
+    let scope_id = node.scope_id.as_deref()?;
+    if let Some(owner_id) = scope_owner_ids.get(scope_id) {
+        if let Some(function) = functions_by_id.get(owner_id) {
+            return Some(qualify_owner_label(
+                modules_by_id
+                    .get(&function.module_id)
+                    .map(|module| module.module_name.as_str()),
+                &function.qualified_name,
+            ));
+        }
+    }
+
+    labels.scope_label(scope_id).or_else(|| {
+        scope_module_ids
+            .get(scope_id)
+            .and_then(|module_id| modules_by_id.get(module_id))
+            .map(|module| module.module_name.clone())
+    })
+}
+
+fn render_graph_variable_name(record: &DefUseNodeRecord, labels: &PlaceLabelContext) -> String {
+    match &record.place {
+        Place::Attribute { .. } | Place::Subscript { .. } => {
+            if record.role == "def" {
+                extract_assignment_target_text(&record.snippet)
+                    .unwrap_or_else(|| labels.short_label(&record.place))
+            } else if !record.snippet.trim().is_empty() {
+                record.snippet.trim().to_string()
+            } else {
+                labels.short_label(&record.place)
+            }
+        }
+        _ => labels.short_label(&record.place),
+    }
+}
+
+fn build_graph_node_tooltip(record: &DefUseNodeRecord, label: &str) -> String {
+    let mut parts = vec![label.to_string()];
+    if !record.file.is_empty() {
+        parts.push(format!("{}:{}:{}", record.file, record.line, record.col));
+    }
+    if !record.snippet.trim().is_empty() {
+        parts.push(record.snippet.trim().to_string());
+    }
+    parts.join("\n")
+}
+
+fn place_kind_name(place: &Place) -> &'static str {
+    match place {
+        Place::Local { .. } => "local",
+        Place::Global { .. } => "global",
+        Place::Closure { .. } => "closure",
+        Place::Attribute { .. } => "attribute",
+        Place::Subscript { .. } => "subscript",
+        Place::External { .. } => "external",
+        Place::Unknown { .. } => "unknown",
+    }
+}
+
+fn edge_dot_attributes(edge: &RenderGraphEdge) -> String {
+    let mut attrs = Vec::new();
+    if let Some(style) = &edge.style {
+        attrs.push(format!("style={style}"));
+    }
+    if let Some(color) = &edge.color {
+        attrs.push(format!("color=\"{color}\""));
+    }
+    if let Some(dir) = &edge.dir {
+        attrs.push(format!("dir={dir}"));
+    }
+    if attrs.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", attrs.join(", "))
+    }
 }
 
 #[cfg(test)]
@@ -6302,5 +7183,285 @@ mod tests {
         assert!(rewritten.contains("<title>def x -&gt; use x (local)</title>"));
         assert!(!rewritten.contains("<title>D_1</title>"));
         assert!(!rewritten.contains("D_1&#45;&gt;U_1"));
+    }
+
+    #[test]
+    fn var_dependency_graph_json_writer_emits_render_ready_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("variable_dependencies.graph.json");
+        let module_span = crate::source::SourceSpan {
+            file: "app/main.py".to_string(),
+            line: 1,
+            col: 1,
+            end_line: 3,
+            end_col: 1,
+            snippet: "def foo(value):".to_string(),
+        };
+        let def_span = crate::source::SourceSpan {
+            file: "app/main.py".to_string(),
+            line: 2,
+            col: 5,
+            end_line: 2,
+            end_col: 14,
+            snippet: "x = value".to_string(),
+        };
+        let use_span = crate::source::SourceSpan {
+            file: "app/main.py".to_string(),
+            line: 3,
+            col: 11,
+            end_line: 3,
+            end_col: 12,
+            snippet: "print(x)".to_string(),
+        };
+        let cache = AnalysisCache {
+            schema_version: SCHEMA_VERSION,
+            modules: vec![crate::ir::ModuleRecord {
+                module_id: "M_app".to_string(),
+                file_id: "F_app".to_string(),
+                module_name: "app.main".to_string(),
+                exports: Vec::new(),
+                imports: Vec::new(),
+            }],
+            scopes: vec![ScopeRecord {
+                scope_id: "S_foo".to_string(),
+                scope_kind: "function".to_string(),
+                parent_scope_id: None,
+                owner_id: "FN_foo".to_string(),
+                span: module_span.clone(),
+            }],
+            functions: vec![FunctionRecord {
+                function_id: "FN_foo".to_string(),
+                module_id: "M_app".to_string(),
+                class_id: None,
+                qualified_name: "foo".to_string(),
+                kind: "function".to_string(),
+                params: vec!["value".to_string()],
+                scope_id: "S_foo".to_string(),
+                span: module_span.clone(),
+            }],
+            definitions: vec![Definition {
+                def_id: "D_x".to_string(),
+                place: Place::Local {
+                    scope_id: "S_foo".to_string(),
+                    name: "x".to_string(),
+                },
+                def_kind: "assign".to_string(),
+                scope_id: "S_foo".to_string(),
+                function_id: Some("FN_foo".to_string()),
+                span: def_span.clone(),
+                expr: "value".to_string(),
+                deps: vec![Place::Local {
+                    scope_id: "S_foo".to_string(),
+                    name: "value".to_string(),
+                }],
+            }],
+            uses: vec![
+                Use {
+                    use_id: "U_value".to_string(),
+                    place: Place::Local {
+                        scope_id: "S_foo".to_string(),
+                        name: "value".to_string(),
+                    },
+                    use_kind: "load".to_string(),
+                    scope_id: "S_foo".to_string(),
+                    function_id: Some("FN_foo".to_string()),
+                    span: def_span.clone(),
+                    context: "rhs".to_string(),
+                },
+                Use {
+                    use_id: "U_x".to_string(),
+                    place: Place::Local {
+                        scope_id: "S_foo".to_string(),
+                        name: "x".to_string(),
+                    },
+                    use_kind: "load".to_string(),
+                    scope_id: "S_foo".to_string(),
+                    function_id: Some("FN_foo".to_string()),
+                    span: use_span.clone(),
+                    context: "call".to_string(),
+                },
+            ],
+            def_use_edges: vec![DefUseEdge {
+                edge_id: "DU_x".to_string(),
+                def_id: "D_x".to_string(),
+                use_id: "U_x".to_string(),
+                place: Place::Local {
+                    scope_id: "S_foo".to_string(),
+                    name: "x".to_string(),
+                },
+                edge_kind: "local".to_string(),
+                path_summary: "local".to_string(),
+            }],
+            var_dependency_edges: vec![crate::ir::VarDependencyEdge {
+                edge_id: "VD_x".to_string(),
+                source_place: Place::Local {
+                    scope_id: "S_foo".to_string(),
+                    name: "value".to_string(),
+                },
+                target_place: Place::Local {
+                    scope_id: "S_foo".to_string(),
+                    name: "x".to_string(),
+                },
+                source_id: "U_value".to_string(),
+                target_id: "D_x".to_string(),
+                dep_kind: "assignment".to_string(),
+                span: def_span,
+            }],
+            ..AnalysisCache::default()
+        };
+
+        write_var_dependency_graph_json(&cache, &path, 10).unwrap();
+
+        let json = std::fs::read_to_string(path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["graph_kind"], "VariableDependencies");
+        assert_eq!(value["views"][0]["id"], "variable_dependencies");
+        assert_eq!(value["views"][0]["root_node_ids"][0], "D_x");
+        assert_eq!(value["views"][0]["path_ids"].as_array().unwrap().len(), 1);
+        assert_eq!(value["stats"]["def_count"], 1);
+        assert_eq!(value["stats"]["use_count"], 2);
+        assert_eq!(value["paths"].as_array().unwrap().len(), 1);
+        assert_eq!(value["paths"][0]["root_node_id"], "D_x");
+        assert_eq!(value["paths"][0]["node_ids"][0], "D_x");
+        assert_eq!(value["paths"][0]["node_ids"][1], "U_x");
+        assert!(
+            value["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| node["label"] == "def app.main::foo::x @ line 2")
+        );
+        assert!(
+            value["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| edge["kind"] == "assignment"
+                    && edge["from"] == "U_value"
+                    && edge["to"] == "D_x")
+        );
+        assert!(
+            value["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| edge["kind"] == "def-use"
+                    && edge["from"] == "D_x"
+                    && edge["to"] == "U_x")
+        );
+    }
+
+    #[test]
+    fn def_use_hotspot_graph_json_writer_emits_paths_and_render_ready_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("def_use_hotspots.graph.json");
+        let def_span = crate::source::SourceSpan {
+            file: "app/main.py".to_string(),
+            line: 10,
+            col: 4,
+            end_line: 10,
+            end_col: 9,
+            snippet: "x = value".to_string(),
+        };
+        let use_span = crate::source::SourceSpan {
+            file: "app/main.py".to_string(),
+            line: 11,
+            col: 11,
+            end_line: 11,
+            end_col: 12,
+            snippet: "print(x)".to_string(),
+        };
+        let cache = AnalysisCache {
+            schema_version: SCHEMA_VERSION,
+            modules: vec![crate::ir::ModuleRecord {
+                module_id: "M_app".to_string(),
+                file_id: "F_app".to_string(),
+                module_name: "app.main".to_string(),
+                exports: Vec::new(),
+                imports: Vec::new(),
+            }],
+            scopes: vec![ScopeRecord {
+                scope_id: "S".to_string(),
+                scope_kind: "function".to_string(),
+                parent_scope_id: None,
+                owner_id: "FN_foo".to_string(),
+                span: def_span.clone(),
+            }],
+            functions: vec![FunctionRecord {
+                function_id: "FN_foo".to_string(),
+                module_id: "M_app".to_string(),
+                class_id: None,
+                qualified_name: "foo".to_string(),
+                kind: "function".to_string(),
+                params: Vec::new(),
+                scope_id: "S".to_string(),
+                span: def_span.clone(),
+            }],
+            definitions: vec![Definition {
+                def_id: "D_x".to_string(),
+                place: Place::Local {
+                    scope_id: "S".to_string(),
+                    name: "x".to_string(),
+                },
+                def_kind: "assign".to_string(),
+                scope_id: "S".to_string(),
+                function_id: Some("FN_foo".to_string()),
+                span: def_span,
+                expr: "value".to_string(),
+                deps: Vec::new(),
+            }],
+            uses: vec![Use {
+                use_id: "U_x".to_string(),
+                place: Place::Local {
+                    scope_id: "S".to_string(),
+                    name: "x".to_string(),
+                },
+                use_kind: "load".to_string(),
+                scope_id: "S".to_string(),
+                function_id: Some("FN_foo".to_string()),
+                span: use_span,
+                context: "call".to_string(),
+            }],
+            def_use_edges: vec![DefUseEdge {
+                edge_id: "DU_1".to_string(),
+                def_id: "D_x".to_string(),
+                use_id: "U_x".to_string(),
+                place: Place::Local {
+                    scope_id: "S".to_string(),
+                    name: "x".to_string(),
+                },
+                edge_kind: "local".to_string(),
+                path_summary: "same-block".to_string(),
+            }],
+            ..AnalysisCache::default()
+        };
+
+        write_def_use_hotspots_graph_json(&cache, &path, 10).unwrap();
+
+        let json = std::fs::read_to_string(path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["graph_kind"], "DefUseHotspots");
+        assert_eq!(value["views"][0]["id"], "def_use_hotspots");
+        assert_eq!(value["views"][0]["root_node_ids"][0], "D_x");
+        assert_eq!(value["stats"]["def_count"], 1);
+        assert_eq!(value["stats"]["use_count"], 1);
+        assert_eq!(value["paths"].as_array().unwrap().len(), 1);
+        assert_eq!(value["paths"][0]["root_node_id"], "D_x");
+        assert!(
+            value["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| node["label"] == "def app.main::foo::x @ line 10")
+        );
+        assert!(
+            value["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| edge["kind"] == "local"
+                    && edge["from"] == "D_x"
+                    && edge["to"] == "U_x")
+        );
     }
 }
