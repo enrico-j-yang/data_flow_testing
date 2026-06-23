@@ -292,12 +292,14 @@ fn write_graphs(
     for spec in specs {
         let dot_path = graph_dir.join(format!("{}.dot", spec.stem));
         let svg_path = graph_dir.join(format!("{}.svg", spec.stem));
+        let json_path = graph_dir.join(format!("{}.graph.json", spec.stem));
         match spec.writer {
             GraphWriter::DefUseHotspots => {
                 graph::write_def_use_hotspots_dot(cache, &dot_path, spec.top_n.unwrap_or(top_n))?
             }
             GraphWriter::VariableDependencies => {
-                graph::write_var_dependency_dot(cache, &dot_path, spec.top_n.unwrap_or(top_n))?
+                graph::write_var_dependency_dot(cache, &dot_path, spec.top_n.unwrap_or(top_n))?;
+                graph::write_var_dependency_graph_json(cache, &json_path)?
             }
         }
         let svg_written = graph::render_svg(&dot_path, &svg_path)?;
@@ -305,6 +307,8 @@ fn write_graphs(
             name: spec.name.to_string(),
             dot_rel: format!("graphs/{}.dot", spec.stem),
             svg_rel: svg_written.then(|| format!("graphs/{}.svg", spec.stem)),
+            json_rel: matches!(spec.writer, GraphWriter::VariableDependencies)
+                .then(|| format!("graphs/{}.graph.json", spec.stem)),
         });
     }
 
@@ -324,7 +328,7 @@ fn remove_stale_graph_artifacts(graph_dir: &Path, active_specs: &[GraphSpec]) ->
             continue;
         }
 
-        for ext in ["dot", "svg"] {
+        for ext in ["dot", "svg", "graph.json"] {
             let path = graph_dir.join(format!("{stem}.{ext}"));
             if path.exists() {
                 fs::remove_file(&path)
@@ -345,11 +349,29 @@ fn write_index(cache: &AnalysisCache, out: &Path, graphs: &[GeneratedGraph]) -> 
                 .as_ref()
                 .map(|svg| format!(r#"<a href="{svg}">SVG</a>"#))
                 .unwrap_or_else(|| "<span>SVG unavailable</span>".to_string());
+            let json_link = graph
+                .json_rel
+                .as_ref()
+                .map(|json| format!(r#"<a href="{json}">JSON</a>"#))
+                .unwrap_or_default();
+            let links = if json_link.is_empty() {
+                format!(
+                    r#"<a href="{}">DOT</a> · {}"#,
+                    escape_html(&graph.dot_rel),
+                    svg_link
+                )
+            } else {
+                format!(
+                    r#"<a href="{}">DOT</a> · {} · {}"#,
+                    escape_html(&graph.dot_rel),
+                    svg_link,
+                    json_link
+                )
+            };
             format!(
-                r#"<article class="graph-card"><h3>{}</h3><p><a href="{}">DOT</a> · {}</p></article>"#,
+                r#"<article class="graph-card"><h3>{}</h3><p>{}</p></article>"#,
                 escape_html(&graph.name),
-                escape_html(&graph.dot_rel),
-                svg_link
+                links
             )
         })
         .collect::<Vec<_>>()
@@ -555,4 +577,5 @@ struct GeneratedGraph {
     name: String,
     dot_rel: String,
     svg_rel: Option<String>,
+    json_rel: Option<String>,
 }
