@@ -1,5 +1,7 @@
-use crate::ir::{AnalysisCache, Place};
+use crate::ids::stable_id;
+use crate::ir::{AnalysisCache, Place, SCHEMA_VERSION};
 use anyhow::{Context, Result};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -57,6 +59,101 @@ enum TraversalNode {
 struct TraversalEdge<R> {
     to: TraversalNode,
     render_edge: R,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VariableDependencyGraphJson {
+    schema_version: u32,
+    graph_kind: &'static str,
+    nodes: Vec<VariableDependencyGraphNode>,
+    edges: Vec<VariableDependencyGraphEdge>,
+    views: Vec<VariableDependencyGraphView>,
+    paths: Vec<VariableDependencyGraphPath>,
+    stats: VariableDependencyGraphStats,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VariableDependencyGraphNode {
+    id: String,
+    kind: String,
+    module: String,
+    function: Option<String>,
+    variable: String,
+    line: usize,
+    col: usize,
+    place_kind: &'static str,
+    scope_id: Option<String>,
+    label: String,
+    tooltip: String,
+    snippet: String,
+    span: VariableDependencyGraphSpan,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VariableDependencyGraphSpan {
+    file: String,
+    line: usize,
+    col: usize,
+    end_line: usize,
+    end_col: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VariableDependencyGraphEdge {
+    id: String,
+    from: String,
+    to: String,
+    kind: String,
+    label: String,
+    color: Option<&'static str>,
+    style: Option<&'static str>,
+    dir: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VariableDependencyGraphView {
+    id: &'static str,
+    title: &'static str,
+    node_ids: Vec<String>,
+    edge_ids: Vec<String>,
+    root_node_ids: Vec<String>,
+    path_ids: Vec<String>,
+    clusters: Vec<VariableDependencyGraphCluster>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VariableDependencyGraphCluster {
+    id: String,
+    label: String,
+    node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VariableDependencyGraphPath {
+    id: String,
+    root_node_id: String,
+    node_ids: Vec<String>,
+    edge_ids: Vec<String>,
+    path_len: usize,
+    max_fan_in: usize,
+    max_fan_out: usize,
+    score_kind: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VariableDependencyGraphStats {
+    node_count: usize,
+    edge_count: usize,
+    def_count: usize,
+    use_count: usize,
+    root_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct VariableDependencyGraphSelection {
+    nodes: BTreeMap<String, DefUseNodeRecord>,
+    edges: BTreeSet<(String, String, String)>,
+    root_node_ids: Vec<String>,
 }
 
 type HotspotTraversalNode = TraversalNode;
@@ -941,7 +1038,7 @@ fn qualify_owner_label(module_label: Option<&str>, qualified_name: &str) -> Stri
     format!("{module_label}::{qualified_name}")
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct DefUseNodeRecord {
     role: &'static str,
     place: Place,
@@ -949,6 +1046,8 @@ struct DefUseNodeRecord {
     file: String,
     line: usize,
     col: usize,
+    end_line: usize,
+    end_col: usize,
     snippet: String,
 }
 
@@ -961,6 +1060,8 @@ impl DefUseNodeRecord {
             file: definition.span.file.clone(),
             line: definition.span.line,
             col: definition.span.col,
+            end_line: definition.span.end_line,
+            end_col: definition.span.end_col,
             snippet: definition.span.snippet.clone(),
         }
     }
@@ -973,6 +1074,8 @@ impl DefUseNodeRecord {
             file: use_site.span.file.clone(),
             line: use_site.span.line,
             col: use_site.span.col,
+            end_line: use_site.span.end_line,
+            end_col: use_site.span.end_col,
             snippet: use_site.span.snippet.clone(),
         }
     }
@@ -985,6 +1088,8 @@ impl DefUseNodeRecord {
             file: String::new(),
             line: 0,
             col: 0,
+            end_line: 0,
+            end_col: 0,
             snippet: String::new(),
         }
     }
@@ -1001,6 +1106,8 @@ impl DefUseNodeRecord {
             file: span.file.clone(),
             line: span.line,
             col: span.col,
+            end_line: span.end_line,
+            end_col: span.end_col,
             snippet: span.snippet.clone(),
         }
     }
@@ -1176,6 +1283,8 @@ fn canonical_use_record(
             file: use_site.span.file.clone(),
             line: use_site.span.line,
             col: 0,
+            end_line: use_site.span.end_line,
+            end_col: use_site.span.end_col,
             snippet: String::new(),
         },
     )
@@ -1245,6 +1354,895 @@ fn is_assignment_callee_edge(
     }
 
     expr.starts_with(snippet) && expr[snippet.len()..].trim_start().starts_with('(')
+}
+
+fn build_variable_dependency_selection(cache: &AnalysisCache) -> VariableDependencyGraphSelection {
+    let definitions_by_id = cache
+        .definitions
+        .iter()
+        .map(|definition| (definition.def_id.clone(), definition))
+        .collect::<BTreeMap<_, _>>();
+    let uses_by_id = cache
+        .uses
+        .iter()
+        .map(|use_site| (use_site.use_id.clone(), use_site))
+        .collect::<BTreeMap<_, _>>();
+    let exact_defined_scope_places = cache
+        .definitions
+        .iter()
+        .map(|definition| (definition.scope_id.clone(), definition.place.clone()))
+        .collect::<BTreeSet<_>>();
+    let local_defs_by_scope_name = cache.definitions.iter().fold(
+        BTreeMap::<String, BTreeSet<String>>::new(),
+        |mut map, definition| {
+            if let Place::Local { scope_id, name } = &definition.place {
+                map.entry(scope_id.clone())
+                    .or_default()
+                    .insert(name.clone());
+            }
+            map
+        },
+    );
+    let global_defs_by_module_name = cache.definitions.iter().fold(
+        BTreeMap::<String, BTreeSet<String>>::new(),
+        |mut map, definition| {
+            if let Place::Global { module_id, name } = &definition.place {
+                map.entry(module_id.clone())
+                    .or_default()
+                    .insert(name.clone());
+            }
+            map
+        },
+    );
+    let function_module_ids = cache
+        .functions
+        .iter()
+        .map(|function| (function.function_id.clone(), function.module_id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let class_module_ids = cache
+        .classes
+        .iter()
+        .map(|class_record| {
+            (
+                class_record.class_id.clone(),
+                class_record.module_id.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let module_ids = cache
+        .modules
+        .iter()
+        .map(|module_record| module_record.module_id.clone())
+        .collect::<BTreeSet<_>>();
+    let scope_module_ids =
+        cache
+            .scopes
+            .iter()
+            .fold(BTreeMap::<String, String>::new(), |mut map, scope| {
+                if module_ids.contains(&scope.owner_id) {
+                    map.insert(scope.scope_id.clone(), scope.owner_id.clone());
+                } else if let Some(module_id) = function_module_ids.get(&scope.owner_id) {
+                    map.insert(scope.scope_id.clone(), module_id.clone());
+                } else if let Some(module_id) = class_module_ids.get(&scope.owner_id) {
+                    map.insert(scope.scope_id.clone(), module_id.clone());
+                }
+                map
+            });
+    let canonical_use_records = cache
+        .uses
+        .iter()
+        .map(|use_site| {
+            (
+                use_site.use_id.clone(),
+                canonical_use_record(
+                    use_site,
+                    &exact_defined_scope_places,
+                    &local_defs_by_scope_name,
+                    &global_defs_by_module_name,
+                    &scope_module_ids,
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let incoming_var_edge_count = cache
+        .var_dependency_edges
+        .iter()
+        .filter(|edge| {
+            edge.dep_kind != "call-arg"
+                && !is_assignment_callee_edge(edge, &definitions_by_id, &uses_by_id)
+                && canonical_use_records
+                    .get(&edge.source_id)
+                    .map(|(node_id, _)| node_id == &edge.source_id)
+                    .unwrap_or(true)
+        })
+        .fold(BTreeMap::<String, usize>::new(), |mut map, edge| {
+            *map.entry(edge.target_id.clone()).or_insert(0) += 1;
+            map
+        });
+    let mut root_target_ids = cache
+        .definitions
+        .iter()
+        .filter(|definition| !incoming_var_edge_count.contains_key(&definition.def_id))
+        .map(|definition| definition.def_id.clone())
+        .collect::<BTreeSet<_>>();
+    if root_target_ids.is_empty() {
+        root_target_ids.extend(
+            cache
+                .definitions
+                .iter()
+                .map(|definition| definition.def_id.clone()),
+        );
+    }
+    let var_edges_by_target_id = cache.var_dependency_edges.iter().fold(
+        BTreeMap::<String, Vec<&crate::ir::VarDependencyEdge>>::new(),
+        |mut map, edge| {
+            map.entry(edge.target_id.clone()).or_default().push(edge);
+            map
+        },
+    );
+    let call_arg_target_ids = cache
+        .var_dependency_edges
+        .iter()
+        .filter(|edge| edge.dep_kind == "call-arg")
+        .fold(
+            BTreeMap::<String, BTreeSet<String>>::new(),
+            |mut map, edge| {
+                map.entry(edge.source_id.clone())
+                    .or_default()
+                    .insert(edge.target_id.clone());
+                map
+            },
+        );
+    let def_use_edges_by_def_id = cache.def_use_edges.iter().fold(
+        BTreeMap::<String, Vec<&crate::ir::DefUseEdge>>::new(),
+        |mut map, edge| {
+            map.entry(edge.def_id.clone()).or_default().push(edge);
+            map
+        },
+    );
+    let def_use_edges_by_use_id = cache.def_use_edges.iter().fold(
+        BTreeMap::<String, Vec<&crate::ir::DefUseEdge>>::new(),
+        |mut map, edge| {
+            map.entry(edge.use_id.clone()).or_default().push(edge);
+            map
+        },
+    );
+    let fallback_def_ids_by_use_id = cache
+        .uses
+        .iter()
+        .filter_map(|use_site| {
+            let Some((canonical_node_id, canonical_record)) =
+                canonical_use_records.get(&use_site.use_id)
+            else {
+                return None;
+            };
+            if canonical_node_id == &use_site.use_id
+                || def_use_edges_by_use_id.contains_key(&use_site.use_id)
+            {
+                return None;
+            }
+
+            let def_ids = latest_definition_ids_for_place(
+                &canonical_record.place,
+                use_site,
+                &cache.definitions,
+            );
+            if def_ids.is_empty() {
+                None
+            } else {
+                Some((use_site.use_id.clone(), def_ids))
+            }
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut same_line_def_ids = BTreeMap::<(String, String, usize), BTreeSet<String>>::new();
+    for definition in &cache.definitions {
+        if definition.span.line == 0 {
+            continue;
+        }
+        same_line_def_ids
+            .entry((
+                definition.scope_id.clone(),
+                definition.span.file.clone(),
+                definition.span.line,
+            ))
+            .or_default()
+            .insert(definition.def_id.clone());
+    }
+    let concrete_use_to_def_edges = cache
+        .var_dependency_edges
+        .iter()
+        .map(|edge| (edge.source_id.clone(), edge.target_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut reachability = BTreeMap::<TraversalNode, Vec<TraversalEdge<()>>>::new();
+    let mut same_line_edges = BTreeSet::new();
+
+    for (target_id, def_use_edges) in &def_use_edges_by_def_id {
+        for edge in def_use_edges {
+            reachability
+                .entry(TraversalNode::Def(target_id.clone()))
+                .or_default()
+                .push(TraversalEdge {
+                    to: TraversalNode::Use(edge.use_id.clone()),
+                    render_edge: (),
+                });
+        }
+    }
+
+    for (target_id, var_edges) in &var_edges_by_target_id {
+        for edge in var_edges {
+            reachability
+                .entry(TraversalNode::Def(target_id.clone()))
+                .or_default()
+                .push(TraversalEdge {
+                    to: TraversalNode::Use(edge.source_id.clone()),
+                    render_edge: (),
+                });
+        }
+    }
+
+    for (use_id, target_ids) in &call_arg_target_ids {
+        for target_id in target_ids {
+            reachability
+                .entry(TraversalNode::Use(use_id.clone()))
+                .or_default()
+                .push(TraversalEdge {
+                    to: TraversalNode::Def(target_id.clone()),
+                    render_edge: (),
+                });
+        }
+    }
+
+    for (use_id, def_ids) in &fallback_def_ids_by_use_id {
+        for def_id in def_ids {
+            reachability
+                .entry(TraversalNode::Use(use_id.clone()))
+                .or_default()
+                .push(TraversalEdge {
+                    to: TraversalNode::Def(def_id.clone()),
+                    render_edge: (),
+                });
+        }
+    }
+
+    for use_site in &cache.uses {
+        let key = (
+            use_site.scope_id.clone(),
+            use_site.span.file.clone(),
+            use_site.span.line,
+        );
+        let Some(def_ids) = same_line_def_ids.get(&key) else {
+            continue;
+        };
+        for def_id in def_ids {
+            reachability
+                .entry(TraversalNode::Use(use_site.use_id.clone()))
+                .or_default()
+                .push(TraversalEdge {
+                    to: TraversalNode::Def(def_id.clone()),
+                    render_edge: (),
+                });
+            if !concrete_use_to_def_edges.contains(&(use_site.use_id.clone(), def_id.clone())) {
+                same_line_edges.insert((
+                    use_site.use_id.clone(),
+                    def_id.clone(),
+                    "same-line".to_string(),
+                ));
+            }
+        }
+    }
+
+    let selected_nodes = collect_reachable_traversal_nodes(
+        &root_target_ids
+            .iter()
+            .cloned()
+            .map(TraversalNode::Def)
+            .collect::<Vec<_>>(),
+        &reachability,
+    );
+    let selected_target_ids = selected_nodes
+        .iter()
+        .filter_map(|node| match node {
+            TraversalNode::Def(def_id) => Some(def_id.clone()),
+            TraversalNode::Use(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let selected_use_ids = selected_nodes
+        .iter()
+        .filter_map(|node| match node {
+            TraversalNode::Use(use_id) => Some(use_id.clone()),
+            TraversalNode::Def(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
+
+    let mut nodes = BTreeMap::new();
+    let mut edges = BTreeSet::new();
+
+    for target_id in &selected_target_ids {
+        if let Some(definition) = definitions_by_id.get(target_id) {
+            nodes
+                .entry(target_id.clone())
+                .or_insert_with(|| DefUseNodeRecord::definition(definition));
+        }
+    }
+    for use_id in &selected_use_ids {
+        let (node_id, record) = canonical_use_records
+            .get(use_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                (
+                    use_id.clone(),
+                    uses_by_id
+                        .get(use_id)
+                        .map(|use_site| DefUseNodeRecord::usage(use_site))
+                        .unwrap_or_else(|| {
+                            DefUseNodeRecord::fallback(
+                                "use",
+                                Place::Unknown {
+                                    reason: "unresolved-use".to_string(),
+                                },
+                            )
+                        }),
+                )
+            });
+        nodes.entry(node_id).or_insert(record);
+    }
+
+    for target_id in &selected_target_ids {
+        let Some(bundle) = var_edges_by_target_id.get(target_id) else {
+            continue;
+        };
+        for edge in bundle {
+            let (source_node_id, source_record) = canonical_use_records
+                .get(&edge.source_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    (
+                        edge.source_id.clone(),
+                        uses_by_id
+                            .get(&edge.source_id)
+                            .map(|use_site| DefUseNodeRecord::usage(use_site))
+                            .unwrap_or_else(|| {
+                                DefUseNodeRecord::fallback_with_span(
+                                    "use",
+                                    &edge.source_place,
+                                    &edge.span,
+                                )
+                            }),
+                    )
+                });
+            let target_node_id = edge.target_id.clone();
+
+            nodes
+                .entry(source_node_id.clone())
+                .or_insert_with(|| source_record.clone());
+            nodes.entry(target_node_id.clone()).or_insert_with(|| {
+                definitions_by_id
+                    .get(&edge.target_id)
+                    .map(|definition| DefUseNodeRecord::definition(definition))
+                    .unwrap_or_else(|| {
+                        DefUseNodeRecord::fallback_with_span("def", &edge.target_place, &edge.span)
+                    })
+            });
+            edges.insert((source_node_id, target_node_id, edge.dep_kind.clone()));
+        }
+    }
+
+    for target_id in &selected_target_ids {
+        let Some(def_use_edges) = def_use_edges_by_def_id.get(target_id) else {
+            continue;
+        };
+        for edge in def_use_edges {
+            let def_node_id = edge.def_id.clone();
+            let (use_node_id, use_record) = canonical_use_records
+                .get(&edge.use_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    (
+                        edge.use_id.clone(),
+                        uses_by_id
+                            .get(&edge.use_id)
+                            .map(|use_site| DefUseNodeRecord::usage(use_site))
+                            .unwrap_or_else(|| {
+                                DefUseNodeRecord::fallback("use", edge.place.clone())
+                            }),
+                    )
+                });
+
+            if let Some(definition) = definitions_by_id.get(&edge.def_id) {
+                nodes
+                    .entry(def_node_id.clone())
+                    .or_insert_with(|| DefUseNodeRecord::definition(definition));
+            }
+            if uses_by_id.contains_key(&edge.use_id) {
+                nodes
+                    .entry(use_node_id.clone())
+                    .or_insert_with(|| use_record.clone());
+            }
+            edges.insert((def_node_id, use_node_id, "def-use".to_string()));
+        }
+    }
+
+    for (raw_use_id, def_id, edge_kind) in same_line_edges {
+        if !selected_use_ids.contains(&raw_use_id) || !selected_target_ids.contains(&def_id) {
+            continue;
+        }
+        let (use_id, use_record) = canonical_use_records
+            .get(&raw_use_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                (
+                    raw_use_id.clone(),
+                    uses_by_id
+                        .get(&raw_use_id)
+                        .map(|use_site| DefUseNodeRecord::usage(use_site))
+                        .unwrap_or_else(|| {
+                            DefUseNodeRecord::fallback(
+                                "use",
+                                Place::Unknown {
+                                    reason: "same-line".to_string(),
+                                },
+                            )
+                        }),
+                )
+            });
+        if uses_by_id.contains_key(&raw_use_id) {
+            nodes
+                .entry(use_id.clone())
+                .or_insert_with(|| use_record.clone());
+        }
+        if let Some(definition) = definitions_by_id.get(&def_id) {
+            nodes
+                .entry(def_id.clone())
+                .or_insert_with(|| DefUseNodeRecord::definition(definition));
+        }
+        edges.insert((use_id, def_id, edge_kind));
+    }
+
+    for (raw_use_id, def_ids) in &fallback_def_ids_by_use_id {
+        if !selected_use_ids.contains(raw_use_id) {
+            continue;
+        }
+        let Some((use_id, use_record)) = canonical_use_records.get(raw_use_id).cloned() else {
+            continue;
+        };
+        if let Some(use_site) = uses_by_id.get(raw_use_id) {
+            nodes
+                .entry(use_id.clone())
+                .or_insert_with(|| use_record.clone());
+            for def_id in def_ids {
+                if !selected_target_ids.contains(def_id) {
+                    continue;
+                }
+                if let Some(definition) = definitions_by_id.get(def_id) {
+                    nodes
+                        .entry(def_id.clone())
+                        .or_insert_with(|| DefUseNodeRecord::definition(definition));
+                    if definition_precedes_use(definition, use_site) {
+                        edges.insert((def_id.clone(), use_id.clone(), "def-use".to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut root_node_ids = root_target_ids
+        .into_iter()
+        .filter(|def_id| selected_target_ids.contains(def_id) && nodes.contains_key(def_id))
+        .collect::<Vec<_>>();
+    if root_node_ids.is_empty() {
+        root_node_ids.extend(
+            selected_target_ids
+                .iter()
+                .filter(|def_id| nodes.contains_key(*def_id))
+                .cloned(),
+        );
+    }
+    root_node_ids.sort_by(|left, right| {
+        def_sort_key(definitions_by_id.get(left))
+            .cmp(&def_sort_key(definitions_by_id.get(right)))
+            .then_with(|| left.cmp(right))
+    });
+
+    VariableDependencyGraphSelection {
+        nodes,
+        edges,
+        root_node_ids,
+    }
+}
+
+fn build_variable_dependency_node_labels(
+    nodes: &BTreeMap<String, DefUseNodeRecord>,
+    labels: &PlaceLabelContext,
+) -> BTreeMap<String, String> {
+    let mut short_label_counts = BTreeMap::new();
+    for record in nodes.values() {
+        *short_label_counts
+            .entry(record.base_label(labels))
+            .or_insert(0usize) += 1;
+    }
+
+    let mut node_labels = BTreeMap::new();
+    for (node_id, record) in nodes {
+        let base_label = record.base_label(labels);
+        let short_label = record.short_label(labels);
+        let label = if short_label_counts
+            .get(&base_label)
+            .copied()
+            .unwrap_or_default()
+            > 1
+        {
+            record.disambiguated_label(labels)
+        } else {
+            short_label
+        };
+        node_labels.insert(node_id.clone(), label);
+    }
+
+    let mut final_label_counts = BTreeMap::new();
+    for label in node_labels.values() {
+        *final_label_counts.entry(label.clone()).or_insert(0usize) += 1;
+    }
+
+    let mut finalized = BTreeMap::new();
+    for (node_id, record) in nodes {
+        let mut label = node_labels.get(node_id).cloned().unwrap_or_default();
+        if final_label_counts.get(&label).copied().unwrap_or_default() > 1 {
+            label = record.fully_disambiguated_label(labels);
+        }
+        finalized.insert(node_id.clone(), label);
+    }
+
+    finalized
+}
+
+fn split_scope_label(scope_label: &str) -> (String, Option<String>) {
+    match scope_label.split_once("::") {
+        Some((module, function)) => (module.to_string(), Some(function.to_string())),
+        None => (scope_label.to_string(), None),
+    }
+}
+
+fn variable_dependency_node_owner(
+    record: &DefUseNodeRecord,
+    labels: &PlaceLabelContext,
+) -> (String, Option<String>) {
+    if let Some(scope_id) = record.scope_id.as_deref() {
+        if let Some(scope_label) = labels.scope_label(scope_id) {
+            return split_scope_label(&scope_label);
+        }
+    }
+
+    if let Place::Global { module_id, .. } = &record.place {
+        let module = labels.module_label(module_id).unwrap_or_default();
+        return (module, None);
+    }
+
+    (String::new(), None)
+}
+
+fn variable_dependency_node_variable(
+    record: &DefUseNodeRecord,
+    labels: &PlaceLabelContext,
+    module: &str,
+    function: Option<&str>,
+) -> String {
+    let place_label = record.place_label(labels);
+    if !module.is_empty() {
+        if let Some(function) = function {
+            let prefix = format!("{module}::{function}::");
+            if let Some(value) = place_label.strip_prefix(&prefix) {
+                return value.to_string();
+            }
+        }
+        let prefix = format!("{module}::");
+        if let Some(value) = place_label.strip_prefix(&prefix) {
+            return value.to_string();
+        }
+    }
+    place_label
+}
+
+fn variable_dependency_node_tooltip(record: &DefUseNodeRecord, label: &str) -> String {
+    let mut lines = vec![label.to_string()];
+    if !record.file.is_empty() && record.line > 0 {
+        if record.col > 0 {
+            lines.push(format!("{}:{}:{}", record.file, record.line, record.col));
+        } else {
+            lines.push(format!("{}:{}", record.file, record.line));
+        }
+    }
+    let snippet = record.snippet.trim();
+    if !snippet.is_empty() {
+        lines.push(snippet.to_string());
+    }
+    lines.join("\n")
+}
+
+fn place_kind_label(place: &Place) -> &'static str {
+    match place {
+        Place::Local { .. } => "local",
+        Place::Global { .. } => "global",
+        Place::Closure { .. } => "closure",
+        Place::Attribute { .. } => "attribute",
+        Place::Subscript { .. } => "subscript",
+        Place::External { .. } => "external",
+        Place::Unknown { .. } => "unknown",
+    }
+}
+
+fn variable_dependency_edge_style(
+    kind: &str,
+) -> (
+    Option<&'static str>,
+    Option<&'static str>,
+    Option<&'static str>,
+) {
+    match kind {
+        "call-arg" => (Some("steelblue3"), Some("dashed"), None),
+        "def-use" => (Some("darkolivegreen4"), Some("dotted"), None),
+        "same-line" => (Some("gray60"), Some("dashed"), None),
+        _ => (None, None, None),
+    }
+}
+
+fn build_variable_dependency_graph_json(cache: &AnalysisCache) -> VariableDependencyGraphJson {
+    let selection = build_variable_dependency_selection(cache);
+    let labels = PlaceLabelContext::new(cache);
+    let node_labels = build_variable_dependency_node_labels(&selection.nodes, &labels);
+    let nodes = selection
+        .nodes
+        .iter()
+        .map(|(node_id, record)| {
+            let label = node_labels.get(node_id).cloned().unwrap_or_default();
+            let (module, function) = variable_dependency_node_owner(record, &labels);
+            let variable =
+                variable_dependency_node_variable(record, &labels, &module, function.as_deref());
+            VariableDependencyGraphNode {
+                id: node_id.clone(),
+                kind: record.role.to_string(),
+                module,
+                function,
+                variable,
+                line: record.line,
+                col: record.col,
+                place_kind: place_kind_label(&record.place),
+                scope_id: record.scope_id.clone(),
+                label: label.clone(),
+                tooltip: variable_dependency_node_tooltip(record, &label),
+                snippet: record.snippet.clone(),
+                span: VariableDependencyGraphSpan {
+                    file: record.file.clone(),
+                    line: record.line,
+                    col: record.col,
+                    end_line: record.end_line,
+                    end_col: record.end_col,
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    let edges = selection
+        .edges
+        .iter()
+        .map(|(from, to, kind)| {
+            let (color, style, dir) = variable_dependency_edge_style(kind);
+            VariableDependencyGraphEdge {
+                id: stable_id("GE", SCHEMA_VERSION, &[from, to, kind]),
+                from: from.clone(),
+                to: to.clone(),
+                kind: kind.clone(),
+                label: kind.clone(),
+                color,
+                style,
+                dir,
+            }
+        })
+        .collect::<Vec<_>>();
+    let paths = enumerate_variable_dependency_paths(&selection, &edges);
+    let clusters = build_variable_dependency_clusters(&nodes);
+    let view = VariableDependencyGraphView {
+        id: "variable_dependencies",
+        title: "Variable dependencies",
+        node_ids: nodes.iter().map(|node| node.id.clone()).collect(),
+        edge_ids: edges.iter().map(|edge| edge.id.clone()).collect(),
+        root_node_ids: selection.root_node_ids.clone(),
+        path_ids: paths.iter().map(|path| path.id.clone()).collect(),
+        clusters,
+    };
+    let def_count = nodes.iter().filter(|node| node.kind == "def").count();
+    let use_count = nodes.len().saturating_sub(def_count);
+
+    VariableDependencyGraphJson {
+        schema_version: SCHEMA_VERSION,
+        graph_kind: "VariableDependencies",
+        nodes,
+        edges,
+        views: vec![view],
+        paths,
+        stats: VariableDependencyGraphStats {
+            node_count: selection.nodes.len(),
+            edge_count: selection.edges.len(),
+            def_count,
+            use_count,
+            root_count: selection.root_node_ids.len(),
+        },
+    }
+}
+
+fn build_variable_dependency_clusters(
+    nodes: &[VariableDependencyGraphNode],
+) -> Vec<VariableDependencyGraphCluster> {
+    let mut grouped = BTreeMap::<String, Vec<String>>::new();
+    for node in nodes {
+        let label = match (&node.module.is_empty(), &node.function) {
+            (false, Some(function)) => format!("{}::{}", node.module, function),
+            (false, None) => node.module.clone(),
+            (true, Some(function)) => function.clone(),
+            (true, None) => String::new(),
+        };
+        if label.is_empty() {
+            continue;
+        }
+        grouped.entry(label).or_default().push(node.id.clone());
+    }
+
+    grouped
+        .into_iter()
+        .map(|(label, node_ids)| VariableDependencyGraphCluster {
+            id: stable_id("GC", SCHEMA_VERSION, &[&label]),
+            label,
+            node_ids,
+        })
+        .collect()
+}
+
+fn enumerate_variable_dependency_paths(
+    selection: &VariableDependencyGraphSelection,
+    edges: &[VariableDependencyGraphEdge],
+) -> Vec<VariableDependencyGraphPath> {
+    let mut adjacency = BTreeMap::<String, Vec<(String, String)>>::new();
+    let mut incoming = BTreeMap::<String, usize>::new();
+    let mut outgoing = BTreeMap::<String, usize>::new();
+    let edge_ids = edges
+        .iter()
+        .map(|edge| {
+            (
+                (edge.from.clone(), edge.to.clone(), edge.kind.clone()),
+                edge.id.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    for (from, to, kind) in &selection.edges {
+        adjacency
+            .entry(from.clone())
+            .or_default()
+            .push((to.clone(), kind.clone()));
+        *incoming.entry(to.clone()).or_insert(0) += 1;
+        *outgoing.entry(from.clone()).or_insert(0) += 1;
+        incoming.entry(from.clone()).or_insert(0);
+        outgoing.entry(to.clone()).or_insert(0);
+    }
+
+    for edges in adjacency.values_mut() {
+        edges.sort();
+        edges.dedup();
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut paths = Vec::new();
+    for root_node_id in &selection.root_node_ids {
+        let mut visited = BTreeSet::new();
+        let mut node_ids = Vec::new();
+        let mut path_edge_ids = Vec::new();
+        visit_variable_dependency_paths(
+            root_node_id,
+            root_node_id,
+            &adjacency,
+            &incoming,
+            &outgoing,
+            &edge_ids,
+            &mut visited,
+            &mut node_ids,
+            &mut path_edge_ids,
+            &mut seen,
+            &mut paths,
+        );
+    }
+
+    paths.sort_by(|left, right| {
+        left.root_node_id
+            .cmp(&right.root_node_id)
+            .then_with(|| left.path_len.cmp(&right.path_len))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    paths
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_variable_dependency_paths(
+    root_node_id: &str,
+    current_node_id: &str,
+    adjacency: &BTreeMap<String, Vec<(String, String)>>,
+    incoming: &BTreeMap<String, usize>,
+    outgoing: &BTreeMap<String, usize>,
+    edge_ids: &BTreeMap<(String, String, String), String>,
+    visited: &mut BTreeSet<String>,
+    node_ids: &mut Vec<String>,
+    path_edge_ids: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    paths: &mut Vec<VariableDependencyGraphPath>,
+) {
+    visited.insert(current_node_id.to_string());
+    node_ids.push(current_node_id.to_string());
+
+    let mut explored_child = false;
+    if let Some(next_edges) = adjacency.get(current_node_id) {
+        for (next_node_id, kind) in next_edges {
+            if visited.contains(next_node_id) {
+                continue;
+            }
+            let Some(edge_id) = edge_ids.get(&(
+                current_node_id.to_string(),
+                next_node_id.clone(),
+                kind.clone(),
+            )) else {
+                continue;
+            };
+            explored_child = true;
+            path_edge_ids.push(edge_id.clone());
+            visit_variable_dependency_paths(
+                root_node_id,
+                next_node_id,
+                adjacency,
+                incoming,
+                outgoing,
+                edge_ids,
+                visited,
+                node_ids,
+                path_edge_ids,
+                seen,
+                paths,
+            );
+            path_edge_ids.pop();
+        }
+    }
+
+    if !explored_child {
+        let node_key = node_ids.join("->");
+        let edge_key = path_edge_ids.join("->");
+        let path_id = stable_id("GP", SCHEMA_VERSION, &[root_node_id, &node_key, &edge_key]);
+        if seen.insert(path_id.clone()) {
+            let max_fan_in = node_ids
+                .iter()
+                .map(|node_id| incoming.get(node_id).copied().unwrap_or_default())
+                .max()
+                .unwrap_or_default();
+            let max_fan_out = node_ids
+                .iter()
+                .map(|node_id| outgoing.get(node_id).copied().unwrap_or_default())
+                .max()
+                .unwrap_or_default();
+            paths.push(VariableDependencyGraphPath {
+                id: path_id,
+                root_node_id: root_node_id.to_string(),
+                node_ids: node_ids.clone(),
+                edge_ids: path_edge_ids.clone(),
+                path_len: node_ids.len(),
+                max_fan_in,
+                max_fan_out,
+                score_kind: "reachable",
+            });
+        }
+    }
+
+    node_ids.pop();
+    visited.remove(current_node_id);
+}
+
+pub fn write_var_dependency_graph_json(cache: &AnalysisCache, path: &Path) -> Result<()> {
+    let graph = build_variable_dependency_graph_json(cache);
+    let json = serde_json::to_string_pretty(&graph)?;
+    fs::write(path, json).with_context(|| format!("failed to write {}", path.display()))
 }
 
 pub fn write_var_dependency_dot(cache: &AnalysisCache, path: &Path, _top_n: usize) -> Result<()> {

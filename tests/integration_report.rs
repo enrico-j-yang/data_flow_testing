@@ -16,10 +16,21 @@ fn report_writes_index_cache_and_csv_headers() {
     assert!(dir.path().join("data/analysis-cache.json").exists());
     assert!(dir.path().join("graphs/def_use_hotspots.dot").exists());
     assert!(dir.path().join("graphs/variable_dependencies.dot").exists());
+    assert!(
+        dir.path()
+            .join("graphs/variable_dependencies.graph.json")
+            .exists()
+    );
     assert!(!dir.path().join("graphs/module_dependencies.dot").exists());
     assert!(!dir.path().join("graphs/function_dependencies.dot").exists());
     assert!(dir.path().join("data/def_use_edges.csv").exists());
     assert!(dir.path().join("data/parse_diagnostics.csv").exists());
+    let variable_graph =
+        std::fs::read_to_string(dir.path().join("graphs/variable_dependencies.graph.json"))
+            .unwrap();
+    let variable_graph: serde_json::Value = serde_json::from_str(&variable_graph).unwrap();
+    assert!(variable_graph["nodes"].is_array());
+    assert!(variable_graph["paths"].is_array());
     let definitions = std::fs::read_to_string(dir.path().join("data/definitions.csv")).unwrap();
     assert!(definitions.starts_with("def_id,file,path,line,col"));
     let index = std::fs::read_to_string(dir.path().join("index.html")).unwrap();
