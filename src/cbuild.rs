@@ -40,7 +40,7 @@ pub fn discover_cmake_projects(config: &AnalyzeConfig) -> Result<Vec<CProject>> 
         .with_context(|| format!("failed to canonicalize {}", config.input.display()))?;
 
     let mut projects = Vec::new();
-    for entry in WalkDir::new(&root).min_depth(0).max_depth(6) {
+    for entry in WalkDir::new(&root).min_depth(0) {
         let entry = entry?;
         if !entry.file_type().is_file() || entry.file_name() != OsStr::new("CMakeLists.txt") {
             continue;

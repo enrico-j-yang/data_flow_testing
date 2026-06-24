@@ -38,6 +38,44 @@ fn discover_cmake_projects_finds_cmake_roots() {
 }
 
 #[test]
+fn discover_cmake_projects_finds_deeply_nested_cmake_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir
+        .path()
+        .join("level1")
+        .join("level2")
+        .join("level3")
+        .join("level4")
+        .join("level5")
+        .join("level6")
+        .join("level7");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(
+        nested.join("CMakeLists.txt"),
+        "cmake_minimum_required(VERSION 3.20)\nproject(deep C)\n",
+    )
+    .unwrap();
+
+    let cfg = AnalyzeConfig {
+        lang: "c".to_string(),
+        input: dir.path().to_path_buf(),
+        out: dir.path().join("out"),
+        ..AnalyzeConfig::default()
+    };
+
+    let projects = discover_cmake_projects(&cfg).unwrap();
+    let names = projects
+        .iter()
+        .map(|project| project.relative_name.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        names,
+        vec!["level1/level2/level3/level4/level5/level6/level7".to_string()]
+    );
+}
+
+#[test]
 fn merge_compile_commands_deduplicates_and_sorts_entries() {
     let dir = tempfile::tempdir().unwrap();
     let left = dir.path().join("left.json");
