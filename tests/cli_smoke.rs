@@ -73,6 +73,44 @@ fn analyze_help_mentions_c_build_flags() {
 }
 
 #[test]
+fn analyze_command_accepts_c_build_flags() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("app");
+    let out = dir.path().join("report");
+    let build_root = dir.path().join("build");
+    std::fs::create_dir_all(&input).unwrap();
+    std::fs::create_dir_all(&build_root).unwrap();
+    std::fs::write(
+        input.join("main.py"),
+        "def main():\n    x = 1\n    print(x)\n    return x\n\nmain()\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("data-flow-analyzer").unwrap();
+    cmd.args([
+        "analyze",
+        "--lang",
+        "python",
+        "--input",
+        input.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--build-root",
+        build_root.to_str().unwrap(),
+        "--cmake-arg",
+        "-DFIRST=1",
+        "--cmake-arg",
+        "-DSECOND=2",
+        "--keep-preprocessed",
+    ])
+    .assert()
+    .success();
+
+    assert!(out.join("index.html").exists());
+    assert!(out.join("data/analysis-cache.json").exists());
+}
+
+#[test]
 fn paths_command_writes_query_result_from_cache() {
     let dir = tempdir().unwrap();
     let input = dir.path().join("app");

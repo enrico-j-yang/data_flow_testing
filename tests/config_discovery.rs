@@ -14,6 +14,9 @@ fn config_file_loads_defaults_and_cli_overrides() {
 lang = "python"
 input = "D:/repos/asr_platform/app"
 out = "D:/tmp/dataflow_report"
+build_root = "build/original"
+cmake_args = ["-DOLD=1"]
+keep_preprocessed = false
 max_loop_unroll = 2
 top_n = 50
 emit_full_dot = false
@@ -31,15 +34,18 @@ stub_paths = ["stubs"]
         None,
         None,
         Some(dir.path().join("override_out")),
-        None,
-        Vec::new(),
-        false,
+        Some(dir.path().join("override_build")),
+        vec!["-DNEW=1".to_string(), "-DNEW=2".to_string()],
+        true,
     );
 
     assert_eq!(cfg.lang, "python");
     assert_eq!(cfg.max_loop_unroll, 2);
     assert_eq!(cfg.top_n, 50);
     assert!(cfg.out.ends_with("override_out"));
+    assert_eq!(cfg.build_root, Some(dir.path().join("override_build")));
+    assert_eq!(cfg.cmake_args, vec!["-DNEW=1", "-DNEW=2"]);
+    assert!(cfg.keep_preprocessed);
 }
 
 #[test]

@@ -36,7 +36,7 @@ pub enum Commands {
         out: Option<PathBuf>,
         #[arg(long)]
         build_root: Option<PathBuf>,
-        #[arg(long = "cmake-arg")]
+        #[arg(long = "cmake-arg", allow_hyphen_values = true)]
         cmake_args: Vec<String>,
         #[arg(long, default_value_t = false)]
         keep_preprocessed: bool,
