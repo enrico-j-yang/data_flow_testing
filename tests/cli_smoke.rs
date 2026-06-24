@@ -1,6 +1,9 @@
+use clap::Parser;
+use data_flow_analyzer::cli::{Cli, Commands};
 use assert_cmd::{Command, cargo::cargo_bin};
 use predicates::str::contains;
 use std::fs;
+use std::path::PathBuf;
 use tempfile::tempdir;
 
 #[test]
@@ -108,6 +111,36 @@ fn analyze_command_accepts_c_build_flags() {
 
     assert!(out.join("index.html").exists());
     assert!(out.join("data/analysis-cache.json").exists());
+}
+
+#[test]
+fn analyze_command_parses_c_build_flags() {
+    let cli = Cli::try_parse_from([
+        "data-flow-analyzer",
+        "analyze",
+        "--build-root",
+        "build/cmake",
+        "--cmake-arg",
+        "-DFIRST=1",
+        "--cmake-arg",
+        "-DSECOND=2",
+        "--keep-preprocessed",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Some(Commands::Analyze {
+            build_root,
+            cmake_args,
+            keep_preprocessed,
+            ..
+        }) => {
+            assert_eq!(build_root, Some(PathBuf::from("build/cmake")));
+            assert_eq!(cmake_args, vec!["-DFIRST=1", "-DSECOND=2"]);
+            assert!(keep_preprocessed);
+        }
+        other => panic!("expected analyze command, got {other:?}"),
+    }
 }
 
 #[test]
