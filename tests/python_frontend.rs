@@ -6,6 +6,7 @@ use data_flow_analyzer::ir::{AnalysisCache, Place};
 use data_flow_analyzer::lang::LanguageFrontend;
 use data_flow_analyzer::lang::python::PythonFrontend;
 use data_flow_analyzer::paths::{PathQueryOptions, query_function_paths};
+use data_flow_analyzer::source::SourceUnit;
 use std::fs;
 
 fn parse_python(source_text: &str) -> AnalysisCache {
@@ -13,12 +14,28 @@ fn parse_python(source_text: &str) -> AnalysisCache {
     let path = dir.path().join("sample.py");
     fs::write(&path, source_text).unwrap();
 
-    let source = SourceFile {
+    let unit = SourceUnit {
         absolute_path: path,
         relative_path: "sample.py".to_string(),
+        source_text: source_text.to_string(),
+        original_path: None,
+        line_markers: Vec::new(),
     };
 
-    PythonFrontend::new().parse_files(&[source]).unwrap()
+    PythonFrontend::new().parse_units(&[unit]).unwrap()
+}
+
+fn source_units(files: &[SourceFile]) -> Vec<SourceUnit> {
+    files
+        .iter()
+        .map(|file| SourceUnit {
+            absolute_path: file.absolute_path.clone(),
+            relative_path: file.relative_path.clone(),
+            source_text: fs::read_to_string(&file.absolute_path).unwrap(),
+            original_path: None,
+            line_markers: Vec::new(),
+        })
+        .collect()
 }
 
 fn import_records(cache: &AnalysisCache) -> Vec<(String, Option<String>, Option<String>)> {
@@ -360,7 +377,8 @@ fn import_resolver_handles_init_all_and_reexports() {
         ..AnalyzeConfig::default()
     };
     let files = discover_sources(&cfg).unwrap();
-    let mut cache = PythonFrontend::new().parse_files(&files).unwrap();
+    let units = source_units(&files);
+    let mut cache = PythonFrontend::new().parse_units(&units).unwrap();
 
     resolve_imports(&mut cache);
 
@@ -902,12 +920,15 @@ fn parser_records_diagnostics_for_broken_python_and_keeps_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("broken.py");
     std::fs::write(&path, "x = 1\ndef bad(:\n    pass\nz = x\n").unwrap();
-    let source = SourceFile {
+    let unit = SourceUnit {
         absolute_path: path,
         relative_path: "broken.py".to_string(),
+        source_text: "x = 1\ndef bad(:\n    pass\nz = x\n".to_string(),
+        original_path: None,
+        line_markers: Vec::new(),
     };
 
-    let cache = PythonFrontend::new().parse_files(&[source]).unwrap();
+    let cache = PythonFrontend::new().parse_units(&[unit]).unwrap();
     assert_eq!(cache.files[0].parse_status, "partial");
     assert!(
         cache
@@ -932,8 +953,9 @@ fn parser_output_is_deterministic_across_runs() {
         ..AnalyzeConfig::default()
     };
     let files = discover_sources(&cfg).unwrap();
-    let a = PythonFrontend::new().parse_files(&files).unwrap();
-    let b = PythonFrontend::new().parse_files(&files).unwrap();
+    let units = source_units(&files);
+    let a = PythonFrontend::new().parse_units(&units).unwrap();
+    let b = PythonFrontend::new().parse_units(&units).unwrap();
     assert_eq!(
         serde_json::to_string(&a.definitions).unwrap(),
         serde_json::to_string(&b.definitions).unwrap()

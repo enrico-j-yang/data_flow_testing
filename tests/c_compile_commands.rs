@@ -1,7 +1,12 @@
 use data_flow_analyzer::cbuild::{
     configure_cmake_projects, discover_cmake_projects, merge_compile_commands, CProject,
+    CompileCommand,
+};
+use data_flow_analyzer::ccompile::{
+    build_preprocess_arguments, load_preprocessed_unit, parse_line_markers,
 };
 use data_flow_analyzer::config::AnalyzeConfig;
+use data_flow_analyzer::source::LineMarker;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -319,4 +324,115 @@ fn configure_cmake_projects_errors_when_compile_commands_are_missing() {
 
     assert!(err.to_string().contains("compile_commands.json"));
     assert!(err.to_string().contains(project_dir.to_string_lossy().as_ref()));
+}
+
+#[test]
+fn build_preprocess_arguments_rewrites_compile_invocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("sample.i");
+    let command = CompileCommand {
+        directory: dir.path().to_path_buf(),
+        file: dir.path().join("src").join("sample.c"),
+        arguments: Vec::new(),
+        command: Some(
+            "clang -Iinclude -DMODE=1 -include config.h -std=c11 -c src/sample.c -o sample.o -MMD -MF sample.d"
+                .to_string(),
+        ),
+        output: Some(dir.path().join("sample.o")),
+    };
+
+    let args = build_preprocess_arguments(&command, &output).unwrap();
+
+    assert_eq!(
+        args,
+        vec![
+            "clang".to_string(),
+            "-E".to_string(),
+            "-dD".to_string(),
+            "-Iinclude".to_string(),
+            "-DMODE=1".to_string(),
+            "-include".to_string(),
+            "config.h".to_string(),
+            "-std=c11".to_string(),
+            "src/sample.c".to_string(),
+            "-o".to_string(),
+            output.display().to_string(),
+        ]
+    );
+}
+
+#[test]
+fn parse_line_markers_maps_original_files() {
+    let preprocessed = r#"# 1 "src/main.c" 1
+int root = 0;
+# 1 "include/config.h" 1
+#define FLAG 1
+# 2 "src/main.c" 2
+int value = FLAG;
+"#;
+
+    let markers = parse_line_markers(preprocessed);
+
+    assert_eq!(
+        markers,
+        vec![
+            LineMarker {
+                generated_line: 1,
+                original_file: "src/main.c".to_string(),
+                original_line: 1,
+            },
+            LineMarker {
+                generated_line: 3,
+                original_file: "include/config.h".to_string(),
+                original_line: 1,
+            },
+            LineMarker {
+                generated_line: 5,
+                original_file: "src/main.c".to_string(),
+                original_line: 2,
+            },
+        ]
+    );
+}
+
+#[test]
+fn load_preprocessed_unit_preserves_full_preprocessed_text_and_source_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("main.c");
+    let preprocessed_path = dir.path().join("main.i");
+    let preprocessed = r#"# 1 "main.c" 1
+int root = 0;
+# 7 "config.h" 1
+#define FLAG 1
+# 2 "main.c" 2
+int value = FLAG;
+"#;
+    fs::write(&preprocessed_path, preprocessed).unwrap();
+
+    let unit = load_preprocessed_unit(&source_path, &preprocessed_path).unwrap();
+
+    assert_eq!(unit.absolute_path, source_path);
+    assert_eq!(unit.relative_path, "main.c".to_string());
+    assert_eq!(unit.original_path, Some(unit.absolute_path.clone()));
+    assert_eq!(unit.source_text, preprocessed.to_string());
+    assert_eq!(
+        unit.line_markers,
+        vec![
+            LineMarker {
+                generated_line: 1,
+                original_file: "main.c".to_string(),
+                original_line: 1,
+            },
+            LineMarker {
+                generated_line: 3,
+                original_file: "config.h".to_string(),
+                original_line: 7,
+            },
+            LineMarker {
+                generated_line: 5,
+                original_file: "main.c".to_string(),
+                original_line: 2,
+            },
+        ]
+    );
 }

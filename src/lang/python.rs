@@ -7,7 +7,7 @@ use crate::ir::{
     AnalysisCache, CaptureRecord, ClassRecord, Definition, Diagnostic, FunctionRecord,
     ImportRecord, ModuleRecord, Place, SCHEMA_VERSION, ScopeRecord, SourceFileRecord, Use,
 };
-use crate::source::SourceSpan;
+use crate::source::{SourceSpan, SourceUnit};
 use anyhow::{Context, Result, anyhow};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -24,7 +24,7 @@ impl PythonFrontend {
         Self
     }
 
-    fn span(&self, file: &SourceFile, source: &str, node: Node<'_>) -> SourceSpan {
+    fn span(&self, file: &SourceUnit, source: &str, node: Node<'_>) -> SourceSpan {
         let start = node.start_position();
         let end = node.end_position();
 
@@ -41,7 +41,7 @@ impl PythonFrontend {
     fn lower_module(
         &self,
         cache: &mut AnalysisCache,
-        file: &SourceFile,
+        file: &SourceUnit,
         source: &str,
         root: Node<'_>,
     ) {
@@ -1006,7 +1006,7 @@ impl PythonFrontend {
         cfg
     }
 
-    fn module_name_for_file(&self, file: &SourceFile) -> String {
+    fn module_name_for_file(&self, file: &SourceUnit) -> String {
         let relative_module = relative_module_name(&file.relative_path);
         let Some(root) = input_root_dir(file) else {
             return fallback_module_name(&file.relative_path, &relative_module);
@@ -1030,7 +1030,7 @@ impl PythonFrontend {
     fn record_parse_errors(
         &self,
         cache: &mut AnalysisCache,
-        file: &SourceFile,
+        file: &SourceUnit,
         source: &str,
         node: Node<'_>,
     ) {
@@ -1064,16 +1064,16 @@ impl PythonFrontend {
 }
 
 impl LanguageFrontend for PythonFrontend {
-    fn parse_files(&self, files: &[SourceFile]) -> Result<AnalysisCache> {
-        let mut partials = files
+    fn parse_units(&self, units: &[SourceUnit]) -> Result<AnalysisCache> {
+        let mut partials = units
             .par_iter()
-            .map(|file| -> Result<(String, AnalysisCache)> {
-                let cache = self.parse_single_file(file)?;
+            .map(|unit| -> Result<(String, AnalysisCache)> {
+                let cache = self.parse_single_unit(unit)?;
                 let key = cache
                     .files
                     .first()
                     .map(|record| record.path.clone())
-                    .unwrap_or_else(|| file.relative_path.clone());
+                    .unwrap_or_else(|| unit.relative_path.clone());
                 Ok((key, cache))
             })
             .collect::<Vec<_>>()
@@ -1095,18 +1095,38 @@ impl LanguageFrontend for PythonFrontend {
 }
 
 impl PythonFrontend {
-    fn parse_single_file(&self, file: &SourceFile) -> Result<AnalysisCache> {
+    pub fn parse_files(&self, files: &[SourceFile]) -> Result<AnalysisCache> {
+        let units = files
+            .iter()
+            .map(|file| -> Result<SourceUnit> {
+                let source_text = fs::read_to_string(&file.absolute_path)
+                    .with_context(|| format!("failed to read {}", file.absolute_path.display()))?;
+                Ok(SourceUnit {
+                    absolute_path: file.absolute_path.clone(),
+                    relative_path: file.relative_path.clone(),
+                    source_text,
+                    original_path: None,
+                    line_markers: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.parse_units(&units)
+    }
+
+    fn parse_single_unit(&self, unit: &SourceUnit) -> Result<AnalysisCache> {
+        self.parse_source_text(unit, &unit.source_text)
+    }
+
+    fn parse_source_text(&self, unit: &SourceUnit, source: &str) -> Result<AnalysisCache> {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_python::LANGUAGE.into())
             .context("failed to load tree-sitter-python")?;
 
-        let source = fs::read_to_string(&file.absolute_path)
-            .with_context(|| format!("failed to read {}", file.absolute_path.display()))?;
-        let tree = parser.parse(&source, None).ok_or_else(|| {
+        let tree = parser.parse(source, None).ok_or_else(|| {
             anyhow!(
                 "tree-sitter returned no parse tree for {}",
-                file.relative_path
+                unit.relative_path
             )
         })?;
 
@@ -1114,14 +1134,14 @@ impl PythonFrontend {
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             ..AnalysisCache::default()
         };
-        self.record_parse_errors(&mut cache, file, &source, tree.root_node());
-        self.lower_module(&mut cache, file, &source, tree.root_node());
+        self.record_parse_errors(&mut cache, unit, source, tree.root_node());
+        self.lower_module(&mut cache, unit, source, tree.root_node());
         Ok(cache)
     }
 }
 
 struct LoweringContext<'a> {
-    file: &'a SourceFile,
+    file: &'a SourceUnit,
     source: &'a str,
     module_id: String,
     module_scope_id: String,
@@ -1201,7 +1221,7 @@ fn merge_analysis_cache(target: &mut AnalysisCache, mut source: AnalysisCache) {
     target.graph_index.append(&mut source.graph_index);
 }
 
-fn input_root_dir(file: &SourceFile) -> Option<PathBuf> {
+fn input_root_dir(file: &SourceUnit) -> Option<PathBuf> {
     let depth = Path::new(&file.relative_path).components().count();
     let mut root = file.absolute_path.clone();
     for _ in 0..depth {

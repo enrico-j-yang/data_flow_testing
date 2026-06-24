@@ -1,4 +1,22 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LineMarker {
+    pub generated_line: usize,
+    pub original_file: String,
+    pub original_line: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceUnit {
+    pub absolute_path: PathBuf,
+    pub relative_path: String,
+    pub source_text: String,
+    pub original_path: Option<PathBuf>,
+    #[serde(default)]
+    pub line_markers: Vec<LineMarker>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceSpan {
