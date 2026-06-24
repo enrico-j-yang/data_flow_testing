@@ -62,6 +62,17 @@ fn analyze_command_writes_report_for_python_fixture() {
 }
 
 #[test]
+fn analyze_help_mentions_c_build_flags() {
+    let mut cmd = Command::cargo_bin("data-flow-analyzer").unwrap();
+    cmd.args(["analyze", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("--build-root"))
+        .stdout(contains("--cmake-arg"))
+        .stdout(contains("--keep-preprocessed"));
+}
+
+#[test]
 fn paths_command_writes_query_result_from_cache() {
     let dir = tempdir().unwrap();
     let input = dir.path().join("app");
