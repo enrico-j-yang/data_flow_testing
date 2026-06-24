@@ -73,7 +73,7 @@ pub fn configure_cmake_projects(
 
     let mut configured = Vec::new();
     for project in projects {
-        let build_dir = build_root.join(project.relative_name.replace('/', "__"));
+        let build_dir = build_dir_for_project(&build_root, &project.relative_name);
         fs::create_dir_all(&build_dir)?;
 
         let mut command = Command::new("cmake");
@@ -101,10 +101,19 @@ pub fn configure_cmake_projects(
             );
         }
 
+        let compile_commands_path = build_dir.join("compile_commands.json");
+        if !compile_commands_path.is_file() {
+            bail!(
+                "cmake configure succeeded for {} but did not produce {}",
+                project.source_dir.display(),
+                compile_commands_path.display()
+            );
+        }
+
         configured.push(ConfiguredProject {
             project: project.clone(),
             build_dir: build_dir.clone(),
-            compile_commands_path: build_dir.join("compile_commands.json"),
+            compile_commands_path,
         });
     }
 
@@ -151,6 +160,14 @@ fn relative_name(root: &Path, source_dir: &Path) -> String {
         ".".to_string()
     } else {
         rel
+    }
+}
+
+fn build_dir_for_project(build_root: &Path, relative_name: &str) -> PathBuf {
+    if relative_name == "." {
+        build_root.to_path_buf()
+    } else {
+        build_root.join(relative_name)
     }
 }
 
