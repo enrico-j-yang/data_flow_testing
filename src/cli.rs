@@ -1,11 +1,12 @@
 use crate::analysis::{compute_def_use_edges, compute_var_dependencies};
 use crate::config::AnalyzeConfig;
-use crate::fs::discover_sources;
+use crate::fs::{SourceFile, discover_sources};
 use crate::imports::resolve_imports;
 use crate::lang::LanguageFrontend;
 use crate::lang::python::PythonFrontend;
 use crate::paths::{PathQueryOptions, query_function_paths};
 use crate::report::write_report;
+use crate::source::SourceUnit;
 use crate::summaries::{build_initial_summaries, propagate_call_summaries};
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -96,6 +97,23 @@ pub fn run() -> Result<()> {
     }
 }
 
+fn read_source_units(files: &[SourceFile]) -> Result<Vec<SourceUnit>> {
+    files
+        .iter()
+        .map(|file| {
+            let source_text = fs::read_to_string(&file.absolute_path)
+                .with_context(|| format!("failed to read {}", file.absolute_path.display()))?;
+            Ok(SourceUnit {
+                absolute_path: file.absolute_path.clone(),
+                relative_path: file.relative_path.clone(),
+                source_text,
+                original_path: None,
+                line_markers: Vec::new(),
+            })
+        })
+        .collect()
+}
+
 fn run_analyze(
     config: Option<PathBuf>,
     lang: Option<String>,
@@ -127,8 +145,9 @@ fn run_analyze(
     }
 
     let files = discover_sources(&cfg)?;
+    let units = read_source_units(&files)?;
     let frontend = PythonFrontend::new();
-    let mut cache = frontend.parse_files(&files)?;
+    let mut cache = frontend.parse_units(&units)?;
     resolve_imports(&mut cache);
     compute_def_use_edges(&mut cache);
     compute_var_dependencies(&mut cache);
@@ -172,4 +191,31 @@ fn run_paths(input: PathBuf, function: String, max_loop_unroll: usize) -> Result
         .with_context(|| format!("failed to write {}", output_path.display()))?;
     println!("path query written to {}", output_path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_source_units;
+    use crate::fs::SourceFile;
+    use tempfile::tempdir;
+
+    #[test]
+    fn read_source_units_reads_source_text_and_preserves_paths() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("sample.py");
+        std::fs::write(&source_path, "value = 1\n").unwrap();
+
+        let units = read_source_units(&[SourceFile {
+            absolute_path: source_path.clone(),
+            relative_path: "sample.py".to_string(),
+        }])
+        .unwrap();
+
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].absolute_path, source_path);
+        assert_eq!(units[0].relative_path, "sample.py");
+        assert_eq!(units[0].source_text, "value = 1\n");
+        assert_eq!(units[0].original_path, None);
+        assert!(units[0].line_markers.is_empty());
+    }
 }

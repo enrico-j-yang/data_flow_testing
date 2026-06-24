@@ -1,7 +1,6 @@
 use super::LanguageFrontend;
 use crate::alias::{normalize_attribute, normalize_subscript};
 use crate::cfg::ControlFlowGraph;
-use crate::fs::SourceFile;
 use crate::ids::stable_id;
 use crate::ir::{
     AnalysisCache, CaptureRecord, ClassRecord, Definition, Diagnostic, FunctionRecord,
@@ -12,7 +11,6 @@ use anyhow::{Context, Result, anyhow};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::fs;
 use std::path::{Path, PathBuf};
 use tree_sitter::{Node, Parser};
 
@@ -1095,24 +1093,6 @@ impl LanguageFrontend for PythonFrontend {
 }
 
 impl PythonFrontend {
-    pub fn parse_files(&self, files: &[SourceFile]) -> Result<AnalysisCache> {
-        let units = files
-            .iter()
-            .map(|file| -> Result<SourceUnit> {
-                let source_text = fs::read_to_string(&file.absolute_path)
-                    .with_context(|| format!("failed to read {}", file.absolute_path.display()))?;
-                Ok(SourceUnit {
-                    absolute_path: file.absolute_path.clone(),
-                    relative_path: file.relative_path.clone(),
-                    source_text,
-                    original_path: None,
-                    line_markers: Vec::new(),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        self.parse_units(&units)
-    }
-
     fn parse_single_unit(&self, unit: &SourceUnit) -> Result<AnalysisCache> {
         self.parse_source_text(unit, &unit.source_text)
     }

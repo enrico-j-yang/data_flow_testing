@@ -12,7 +12,6 @@ use std::fs;
 fn parse_python(source_text: &str) -> AnalysisCache {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sample.py");
-    fs::write(&path, source_text).unwrap();
 
     let unit = SourceUnit {
         absolute_path: path,
