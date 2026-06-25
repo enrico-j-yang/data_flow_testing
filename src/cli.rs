@@ -34,6 +34,12 @@ pub enum Commands {
         input: Option<PathBuf>,
         #[arg(long)]
         out: Option<PathBuf>,
+        #[arg(long)]
+        build_root: Option<PathBuf>,
+        #[arg(long = "cmake-arg")]
+        cmake_args: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        keep_preprocessed: bool,
     },
     Paths {
         #[arg(long)]
@@ -69,7 +75,18 @@ pub fn run() -> Result<()> {
             lang,
             input,
             out,
-        }) => run_analyze(config, lang, input, out),
+            build_root,
+            cmake_args,
+            keep_preprocessed,
+        }) => run_analyze(
+            config,
+            lang,
+            input,
+            out,
+            build_root,
+            cmake_args,
+            keep_preprocessed,
+        ),
         Some(Commands::Paths {
             input,
             function,
@@ -84,13 +101,16 @@ fn run_analyze(
     lang: Option<String>,
     input: Option<PathBuf>,
     out: Option<PathBuf>,
+    build_root: Option<PathBuf>,
+    cmake_args: Vec<String>,
+    keep_preprocessed: bool,
 ) -> Result<()> {
     let mut cfg = if let Some(config_path) = config {
         AnalyzeConfig::from_toml_file(&config_path)?
     } else {
         AnalyzeConfig::default()
     };
-    cfg.apply_cli_overrides(lang, input, out);
+    cfg.apply_cli_overrides(lang, input, out, build_root, cmake_args, keep_preprocessed);
 
     if cfg.lang != "python" {
         bail!(

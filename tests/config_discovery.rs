@@ -27,12 +27,51 @@ stub_paths = ["stubs"]
     .unwrap();
 
     let mut cfg = AnalyzeConfig::from_toml_file(&cfg_path).unwrap();
-    cfg.apply_cli_overrides(None, None, Some(dir.path().join("override_out")));
+    cfg.apply_cli_overrides(None, None, Some(dir.path().join("override_out")), None, Vec::new(), false);
 
     assert_eq!(cfg.lang, "python");
     assert_eq!(cfg.max_loop_unroll, 2);
     assert_eq!(cfg.top_n, 50);
     assert!(cfg.out.ends_with("override_out"));
+}
+
+#[test]
+fn config_file_loads_c_build_options() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("dataflow.toml");
+    fs::write(
+        &cfg_path,
+        r#"
+lang = "c"
+input = "tests"
+out = "report"
+build_root = "build/cmake"
+cmake_args = ["-DLISA_BASE=/opt/lisa", "-DDEFCONF_FILE=prj-linux.conf"]
+keep_preprocessed = true
+c_project_globs = ["session_*", "stream_text/**"]
+"#,
+    )
+    .unwrap();
+
+    let cfg = AnalyzeConfig::from_toml_file(&cfg_path).unwrap();
+
+    assert_eq!(cfg.lang, "c");
+    assert_eq!(
+        cfg.build_root,
+        Some(cfg_path.parent().unwrap().join("build/cmake"))
+    );
+    assert_eq!(
+        cfg.cmake_args,
+        vec![
+            "-DLISA_BASE=/opt/lisa".to_string(),
+            "-DDEFCONF_FILE=prj-linux.conf".to_string(),
+        ]
+    );
+    assert!(cfg.keep_preprocessed);
+    assert_eq!(
+        cfg.c_project_globs,
+        vec!["session_*".to_string(), "stream_text/**".to_string()]
+    );
 }
 
 #[test]

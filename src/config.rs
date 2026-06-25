@@ -92,6 +92,9 @@ impl AnalyzeConfig {
         lang: Option<String>,
         input: Option<PathBuf>,
         out: Option<PathBuf>,
+        build_root: Option<PathBuf>,
+        cmake_args: Vec<String>,
+        keep_preprocessed: bool,
     ) {
         if let Some(lang) = lang {
             self.lang = lang;
@@ -101,6 +104,15 @@ impl AnalyzeConfig {
         }
         if let Some(out) = out {
             self.out = out;
+        }
+        if let Some(build_root) = build_root {
+            self.build_root = Some(build_root);
+        }
+        if !cmake_args.is_empty() {
+            self.cmake_args = cmake_args;
+        }
+        if keep_preprocessed {
+            self.keep_preprocessed = true;
         }
     }
 
