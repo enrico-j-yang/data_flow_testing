@@ -166,3 +166,96 @@ int run(int value, int (*fn_ptr)(int)) {
         "expected loop-back edge in cfg"
     );
 }
+
+fn parse_c_units(units: &[(&str, &str)]) -> AnalysisCache {
+    let units = units
+        .iter()
+        .map(|(path, text)| SourceUnit {
+            absolute_path: std::path::PathBuf::from(path),
+            relative_path: (*path).to_string(),
+            source_text: (*text).to_string(),
+            original_path: None,
+            line_markers: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    CFrontend::new().parse_units(&units).unwrap()
+}
+
+#[test]
+fn c_symbol_resolution_links_project_local_calls() {
+    let mut cache = parse_c_units(&[
+        (
+            "helper.c",
+            r#"
+int helper(int value) { return value + 1; }
+"#,
+        ),
+        (
+            "main.c",
+            r#"
+int helper(int value);
+int run(int input) { return helper(input); }
+"#,
+        ),
+    ]);
+
+    data_flow_analyzer::csymbols::resolve_c_symbols(&mut cache);
+
+    let call = cache
+        .calls
+        .iter()
+        .find(|call| call.callee_expr == "helper")
+        .expect("a call to helper was recorded");
+    assert_eq!(call.resolution, "project-local");
+    assert_eq!(call.candidate_function_ids.len(), 1);
+}
+
+#[test]
+fn c_summary_propagation_links_argument_to_return_target() {
+    use data_flow_analyzer::analysis::{compute_def_use_edges, compute_var_dependencies};
+    use data_flow_analyzer::summaries::{build_initial_summaries, propagate_call_summaries};
+
+    let mut cache = parse_c_units(&[
+        (
+            "helper.c",
+            r#"
+int helper(int value) { return value; }
+"#,
+        ),
+        (
+            "main.c",
+            r#"
+int helper(int value);
+int run(int input) {
+    int result = helper(input);
+    return result;
+}
+"#,
+        ),
+    ]);
+
+    data_flow_analyzer::csymbols::resolve_c_symbols(&mut cache);
+    compute_def_use_edges(&mut cache);
+    compute_var_dependencies(&mut cache);
+    build_initial_summaries(&mut cache);
+    propagate_call_summaries(&mut cache);
+
+    assert!(
+        cache.function_summaries.iter().any(|summary| {
+            let function = cache
+                .functions
+                .iter()
+                .find(|item| item.function_id == summary.function_id)
+                .expect("summary function exists");
+            function.qualified_name == "run" && !summary.returns.is_empty()
+        }),
+        "expected run summary to have a non-empty returns list"
+    );
+    assert!(
+        cache
+            .var_dependency_edges
+            .iter()
+            .any(|edge| edge.dep_kind == "call-return"),
+        "expected a call-return variable-dependency edge"
+    );
+}

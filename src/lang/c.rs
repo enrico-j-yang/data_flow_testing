@@ -379,8 +379,20 @@ fn lower_local_declaration(
                 .to_string(),
             deps: rhs_uses.iter().map(|use_site| use_site.place.clone()).collect(),
         });
+        let def_id_for_call = cache
+            .definitions
+            .last()
+            .map(|definition| definition.def_id.clone());
         for use_site in rhs_uses {
             cache.uses.push(use_site);
+        }
+        if value.kind() == "call_expression" {
+            lower_call(path, text, value, function_id, scope_id, cache, "assign:rhs");
+            if let (Some(def_id), Some(last_call)) = (def_id_for_call, cache.calls.last_mut()) {
+                if last_call.return_target_def_id.is_none() {
+                    last_call.return_target_def_id = Some(def_id);
+                }
+            }
         }
     }
 }
@@ -537,6 +549,36 @@ fn lower_return_statement(
         span: span_for(path, text, node),
         context: "return value".to_string(),
     });
+    // If the return value is itself a call (or contains nested calls), lower
+    // those into CallRecords so cross-file symbol resolution and summary
+    // propagation see them.
+    lower_nested_calls(path, text, value, function_id, scope_id, cache, "return");
+}
+
+/// Walk an expression and emit CallRecords for any call_expression nodes.
+fn lower_nested_calls(
+    path: &str,
+    text: &str,
+    expr: Node,
+    function_id: &str,
+    scope_id: &str,
+    cache: &mut AnalysisCache,
+    context: &str,
+) {
+    if expr.kind() == "call_expression" {
+        lower_call(path, text, expr, function_id, scope_id, cache, context);
+        if let Some(arguments) = expr.child_by_field_name("arguments") {
+            let mut cursor = arguments.walk();
+            for arg in arguments.named_children(&mut cursor) {
+                lower_nested_calls(path, text, arg, function_id, scope_id, cache, context);
+            }
+        }
+        return;
+    }
+    let mut cursor = expr.walk();
+    for child in expr.named_children(&mut cursor) {
+        lower_nested_calls(path, text, child, function_id, scope_id, cache, context);
+    }
 }
 
 fn lower_if_statement(
