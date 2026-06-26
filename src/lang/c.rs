@@ -1,8 +1,8 @@
 use crate::cfg::ControlFlowGraph;
 use crate::ids::stable_id;
 use crate::ir::{
-    AnalysisCache, Definition, FunctionRecord, ModuleRecord, Place, SCHEMA_VERSION, ScopeRecord,
-    SourceFileRecord, Use,
+    AnalysisCache, CallRecord, Definition, FunctionRecord, ModuleRecord, Place, SCHEMA_VERSION,
+    ScopeRecord, SourceFileRecord, Use,
 };
 use crate::lang::LanguageFrontend;
 use crate::source::{SourceSpan, SourceUnit};
@@ -269,8 +269,8 @@ fn lower_function_body(
     node: Node,
     function_id: &str,
     scope_id: &str,
-    _block_id: &str,
-    _cfg: &mut ControlFlowGraph,
+    block_id: &str,
+    cfg: &mut ControlFlowGraph,
     cache: &mut AnalysisCache,
 ) {
     let Some(body) = node.child_by_field_name("body") else {
@@ -278,60 +278,570 @@ fn lower_function_body(
     };
     let mut cursor = body.walk();
     for child in body.named_children(&mut cursor) {
+        lower_statement(path, text, child, function_id, scope_id, block_id, cfg, cache);
+    }
+}
+
+fn lower_statement(
+    path: &str,
+    text: &str,
+    node: Node,
+    function_id: &str,
+    scope_id: &str,
+    block_id: &str,
+    cfg: &mut ControlFlowGraph,
+    cache: &mut AnalysisCache,
+) {
+    match node.kind() {
+        "declaration" => lower_local_declaration(path, text, node, function_id, scope_id, cache),
+        "expression_statement" => {
+            lower_expression_statement(path, text, node, function_id, scope_id, cache)
+        }
+        "return_statement" => {
+            lower_return_statement(path, text, node, function_id, scope_id, cache)
+        }
+        "if_statement" => {
+            lower_if_statement(path, text, node, function_id, scope_id, block_id, cfg, cache)
+        }
+        "while_statement" | "do_statement" => {
+            lower_while_statement(path, text, node, function_id, scope_id, block_id, cfg, cache)
+        }
+        "for_statement" => {
+            lower_for_statement(path, text, node, function_id, scope_id, block_id, cfg, cache)
+        }
+        "compound_statement" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                lower_statement(path, text, child, function_id, scope_id, block_id, cfg, cache);
+            }
+        }
+        _ => {
+            // Still scan deeper for nested calls or assignments inside unknown constructs.
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                lower_statement(path, text, child, function_id, scope_id, block_id, cfg, cache);
+            }
+        }
+    }
+}
+
+fn lower_local_declaration(
+    path: &str,
+    text: &str,
+    node: Node,
+    function_id: &str,
+    scope_id: &str,
+    cache: &mut AnalysisCache,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() != "init_declarator" {
+            continue;
+        }
+        let Some(declarator) = child.child_by_field_name("declarator") else {
+            continue;
+        };
+        let Some(value) = child.child_by_field_name("value") else {
+            continue;
+        };
+        let name = match identifier_text(declarator, text) {
+            Some(name) => name,
+            None => continue,
+        };
         let snippet = child
             .utf8_text(text.as_bytes())
             .unwrap_or("")
             .trim()
             .to_string();
-
-        if child.kind() == "declaration" && snippet.contains('=') {
-            let (left, right) = snippet.split_once('=').unwrap();
-            let name = left
-                .split_whitespace()
-                .last()
-                .unwrap_or(left)
+        let span = span_for(path, text, child);
+        let rhs_uses = collect_expression_uses(
+            path,
+            text,
+            value,
+            function_id,
+            scope_id,
+            "assign:rhs",
+        );
+        cache.definitions.push(Definition {
+            def_id: stable_id("D", SCHEMA_VERSION, &[function_id, &name, &snippet]),
+            place: Place::Local {
+                scope_id: scope_id.to_string(),
+                name,
+            },
+            def_kind: "assign".to_string(),
+            scope_id: scope_id.to_string(),
+            function_id: Some(function_id.to_string()),
+            span,
+            expr: value
+                .utf8_text(text.as_bytes())
+                .unwrap_or("")
                 .trim()
-                .trim_start_matches('*')
-                .to_string();
-            if name.is_empty() {
-                continue;
-            }
+                .to_string(),
+            deps: rhs_uses.iter().map(|use_site| use_site.place.clone()).collect(),
+        });
+        for use_site in rhs_uses {
+            cache.uses.push(use_site);
+        }
+    }
+}
+
+fn lower_expression_statement(
+    path: &str,
+    text: &str,
+    node: Node,
+    function_id: &str,
+    scope_id: &str,
+    cache: &mut AnalysisCache,
+) {
+    let Some(expr) = node.named_child(0) else {
+        return;
+    };
+    lower_expression(path, text, expr, function_id, scope_id, cache, "expr");
+}
+
+fn lower_expression(
+    path: &str,
+    text: &str,
+    expr: Node,
+    function_id: &str,
+    scope_id: &str,
+    cache: &mut AnalysisCache,
+    context: &str,
+) {
+    match expr.kind() {
+        "assignment_expression" => {
+            let left = expr.child_by_field_name("left");
+            let right = expr.child_by_field_name("right");
+            let (Some(left), Some(right)) = (left, right) else {
+                return;
+            };
+            let lhs_text = left.utf8_text(text.as_bytes()).unwrap_or("").trim();
+            let place = normalize_lvalue(left, text, scope_id);
+            let span = span_for(path, text, expr);
+            let rhs_uses =
+                collect_expression_uses(path, text, right, function_id, scope_id, "assign:rhs");
+            let rhs_text = right.utf8_text(text.as_bytes()).unwrap_or("").trim();
+            let call_target_def_id = stable_id(
+                "D",
+                SCHEMA_VERSION,
+                &[function_id, lhs_text, rhs_text, "expr-assign"],
+            );
             cache.definitions.push(Definition {
-                def_id: stable_id("D", SCHEMA_VERSION, &[function_id, &name, &snippet]),
-                place: Place::Local {
-                    scope_id: scope_id.to_string(),
-                    name,
-                },
+                def_id: call_target_def_id.clone(),
+                place,
                 def_kind: "assign".to_string(),
                 scope_id: scope_id.to_string(),
                 function_id: Some(function_id.to_string()),
-                span: span_for(path, text, child),
-                expr: right.trim().trim_end_matches(';').to_string(),
-                deps: Vec::new(),
+                span: span.clone(),
+                expr: rhs_text.to_string(),
+                deps: rhs_uses.iter().map(|use_site| use_site.place.clone()).collect(),
             });
+            for use_site in rhs_uses {
+                cache.uses.push(use_site);
+            }
+            // If the RHS is a direct call expression, lower it as a call and
+            // wire the call's return_target_def_id to this assignment.
+            if right.kind() == "call_expression" {
+                lower_call(path, text, right, function_id, scope_id, cache, "assign:rhs");
+                if let Some(last_call) = cache.calls.last_mut() {
+                    if last_call.return_target_def_id.is_none() {
+                        last_call.return_target_def_id = Some(call_target_def_id);
+                    }
+                }
+            }
         }
+        "call_expression" => {
+            lower_call(path, text, expr, function_id, scope_id, cache, context);
+        }
+        _ => {
+            // For other expression statements (e.g. ++x, function()), still
+            // collect any sub-expression uses and call records.
+            for use_site in collect_expression_uses(
+                path, text, expr, function_id, scope_id, context,
+            ) {
+                cache.uses.push(use_site);
+            }
+        }
+    }
+}
 
-        if child.kind() == "return_statement" {
-            let value = snippet
-                .trim_start_matches("return")
-                .trim()
-                .trim_end_matches(';')
-                .trim()
-                .to_string();
-            cache.uses.push(Use {
-                use_id: stable_id("U", SCHEMA_VERSION, &[function_id, "return", &value]),
+fn lower_call(
+    path: &str,
+    text: &str,
+    call_node: Node,
+    function_id: &str,
+    scope_id: &str,
+    cache: &mut AnalysisCache,
+    context: &str,
+) {
+    let function_expr = call_node.child_by_field_name("function");
+    let arguments = call_node.child_by_field_name("arguments");
+    let callee_expr = function_expr
+        .and_then(|node| node.utf8_text(text.as_bytes()).ok())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let span = span_for(path, text, call_node);
+    let mut arg_use_ids = Vec::new();
+    if let Some(arguments) = arguments {
+        let mut cursor = arguments.walk();
+        for arg in arguments.named_children(&mut cursor) {
+            for use_site in collect_expression_uses(
+                path,
+                text,
+                arg,
+                function_id,
+                scope_id,
+                "call:arg",
+            ) {
+                arg_use_ids.push(use_site.use_id.clone());
+                cache.uses.push(use_site);
+            }
+        }
+    }
+    cache.calls.push(CallRecord {
+        call_id: stable_id(
+            "CALL",
+            SCHEMA_VERSION,
+            &[function_id, &callee_expr, &span.snippet, context],
+        ),
+        function_id: Some(function_id.to_string()),
+        callee_expr,
+        candidate_function_ids: Vec::new(),
+        resolution: "unresolved".to_string(),
+        arg_use_ids,
+        return_target_def_id: None,
+        span,
+    });
+}
+
+fn lower_return_statement(
+    path: &str,
+    text: &str,
+    node: Node,
+    function_id: &str,
+    scope_id: &str,
+    cache: &mut AnalysisCache,
+) {
+    let Some(value) = node.named_child(0) else {
+        return;
+    };
+    let value_text = value.utf8_text(text.as_bytes()).unwrap_or("").trim();
+    let place = normalize_lvalue(value, text, scope_id);
+    cache.uses.push(Use {
+        use_id: stable_id("U", SCHEMA_VERSION, &[function_id, "return", value_text]),
+        place,
+        use_kind: "read".to_string(),
+        scope_id: scope_id.to_string(),
+        function_id: Some(function_id.to_string()),
+        span: span_for(path, text, node),
+        context: "return value".to_string(),
+    });
+}
+
+fn lower_if_statement(
+    path: &str,
+    text: &str,
+    node: Node,
+    function_id: &str,
+    scope_id: &str,
+    block_id: &str,
+    cfg: &mut ControlFlowGraph,
+    cache: &mut AnalysisCache,
+) {
+    let span = span_for(path, text, node);
+    let then_block = cfg.add_block("Branch", span.clone());
+    let else_block = cfg.add_block("Branch", span);
+    cfg.add_edge(block_id, &then_block, "branch-true", "if");
+    cfg.add_edge(block_id, &else_block, "branch-false", "else");
+    if let Some(condition) = node.child_by_field_name("condition") {
+        for use_site in collect_expression_uses(
+            path, text, condition, function_id, scope_id, "if:cond",
+        ) {
+            cache.uses.push(use_site);
+        }
+    }
+    if let Some(consequence) = node.child_by_field_name("consequence") {
+        let mut cursor = consequence.walk();
+        for child in consequence.named_children(&mut cursor) {
+            lower_statement(path, text, child, function_id, scope_id, &then_block, cfg, cache);
+        }
+    }
+    if let Some(alternative) = node.child_by_field_name("alternative") {
+        let target = alternative.named_child(0).unwrap_or(alternative);
+        let mut cursor = target.walk();
+        for child in target.named_children(&mut cursor) {
+            lower_statement(path, text, child, function_id, scope_id, &else_block, cfg, cache);
+        }
+    }
+}
+
+fn lower_while_statement(
+    path: &str,
+    text: &str,
+    node: Node,
+    function_id: &str,
+    scope_id: &str,
+    block_id: &str,
+    cfg: &mut ControlFlowGraph,
+    cache: &mut AnalysisCache,
+) {
+    let span = span_for(path, text, node);
+    let loop_block = cfg.add_block("Loop", span);
+    cfg.add_edge(block_id, &loop_block, "loop-enter", "while");
+    cfg.add_edge(&loop_block, &loop_block, "loop-back", "while");
+    if let Some(condition) = node.child_by_field_name("condition") {
+        for use_site in collect_expression_uses(
+            path, text, condition, function_id, scope_id, "while:cond",
+        ) {
+            cache.uses.push(use_site);
+        }
+    }
+    if let Some(body) = node.child_by_field_name("body") {
+        let mut cursor = body.walk();
+        for child in body.named_children(&mut cursor) {
+            lower_statement(path, text, child, function_id, scope_id, &loop_block, cfg, cache);
+        }
+    }
+}
+
+fn lower_for_statement(
+    path: &str,
+    text: &str,
+    node: Node,
+    function_id: &str,
+    scope_id: &str,
+    block_id: &str,
+    cfg: &mut ControlFlowGraph,
+    cache: &mut AnalysisCache,
+) {
+    let span = span_for(path, text, node);
+    let loop_block = cfg.add_block("Loop", span);
+    cfg.add_edge(block_id, &loop_block, "loop-enter", "for");
+    cfg.add_edge(&loop_block, &loop_block, "loop-back", "for");
+    if let Some(body) = node.child_by_field_name("body") {
+        let mut cursor = body.walk();
+        for child in body.named_children(&mut cursor) {
+            lower_statement(path, text, child, function_id, scope_id, &loop_block, cfg, cache);
+        }
+    }
+}
+
+/// Recursively walk an expression and produce Use records for every place
+/// referenced. Subscript and field accesses become structural Place variants.
+fn collect_expression_uses(
+    path: &str,
+    text: &str,
+    expr: Node,
+    function_id: &str,
+    scope_id: &str,
+    context: &str,
+) -> Vec<Use> {
+    let mut uses = Vec::new();
+    walk_expression(path, text, expr, function_id, scope_id, context, &mut uses);
+    uses
+}
+
+fn walk_expression(
+    path: &str,
+    text: &str,
+    expr: Node,
+    function_id: &str,
+    scope_id: &str,
+    context: &str,
+    uses: &mut Vec<Use>,
+) {
+    match expr.kind() {
+        "identifier" => {
+            let name = expr.utf8_text(text.as_bytes()).unwrap_or("").trim();
+            if name.is_empty() {
+                return;
+            }
+            uses.push(Use {
+                use_id: stable_id("U", SCHEMA_VERSION, &[function_id, name, context]),
                 place: Place::Local {
                     scope_id: scope_id.to_string(),
-                    name: value.clone(),
+                    name: name.to_string(),
                 },
                 use_kind: "read".to_string(),
                 scope_id: scope_id.to_string(),
                 function_id: Some(function_id.to_string()),
-                span: span_for(path, text, child),
-                context: "return value".to_string(),
+                span: span_for(path, text, expr),
+                context: context.to_string(),
             });
         }
+        "field_expression" => {
+            let base = expr
+                .child_by_field_name("argument")
+                .and_then(|node| node.utf8_text(text.as_bytes()).ok())
+                .unwrap_or("")
+                .trim()
+                .trim_start_matches('*')
+                .to_string();
+            let attr = expr
+                .child_by_field_name("field")
+                .and_then(|node| node.utf8_text(text.as_bytes()).ok())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            uses.push(Use {
+                use_id: stable_id(
+                    "U",
+                    SCHEMA_VERSION,
+                    &[function_id, &base, &attr, context],
+                ),
+                place: Place::Attribute {
+                    base: base.clone(),
+                    attr: attr.clone(),
+                },
+                use_kind: "read".to_string(),
+                scope_id: scope_id.to_string(),
+                function_id: Some(function_id.to_string()),
+                span: span_for(path, text, expr),
+                context: context.to_string(),
+            });
+        }
+        "subscript_expression" => {
+            let base = expr
+                .child_by_field_name("argument")
+                .and_then(|node| node.utf8_text(text.as_bytes()).ok())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let index_node = expr.child_by_field_name("index");
+            let index = index_node
+                .and_then(|node| node.utf8_text(text.as_bytes()).ok())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            uses.push(Use {
+                use_id: stable_id(
+                    "U",
+                    SCHEMA_VERSION,
+                    &[function_id, &base, &index, context],
+                ),
+                place: Place::Subscript {
+                    base: base.clone(),
+                    index: index.clone(),
+                },
+                use_kind: "read".to_string(),
+                scope_id: scope_id.to_string(),
+                function_id: Some(function_id.to_string()),
+                span: span_for(path, text, expr),
+                context: context.to_string(),
+            });
+            // Also emit a Use for the index expression itself so var-dep
+            // analysis can see the dependency on `i`/`index`.
+            if let Some(index_node) = index_node {
+                walk_expression(
+                    path,
+                    text,
+                    index_node,
+                    function_id,
+                    scope_id,
+                    context,
+                    uses,
+                );
+            }
+        }
+        "call_expression" => {
+            // Calls inside a larger expression are lowered separately; just
+            // walk their arguments so we collect identifier uses.
+            if let Some(arguments) = expr.child_by_field_name("arguments") {
+                let mut cursor = arguments.walk();
+                for arg in arguments.named_children(&mut cursor) {
+                    walk_expression(path, text, arg, function_id, scope_id, context, uses);
+                }
+            }
+        }
+        "pointer_expression" | "unary_expression" => {
+            if let Some(operand) = expr.named_child(0) {
+                walk_expression(path, text, operand, function_id, scope_id, context, uses);
+            }
+        }
+        _ => {
+            let mut cursor = expr.walk();
+            for child in expr.named_children(&mut cursor) {
+                walk_expression(path, text, child, function_id, scope_id, context, uses);
+            }
+        }
     }
+}
+
+/// Map an lvalue node to a structural Place. Falls back to Local when no
+/// structural variant fits.
+fn normalize_lvalue(node: Node, text: &str, scope_id: &str) -> Place {
+    match node.kind() {
+        "field_expression" => {
+            let base = node
+                .child_by_field_name("argument")
+                .and_then(|n| n.utf8_text(text.as_bytes()).ok())
+                .unwrap_or("")
+                .trim()
+                .trim_start_matches('*')
+                .to_string();
+            let attr = node
+                .child_by_field_name("field")
+                .and_then(|n| n.utf8_text(text.as_bytes()).ok())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            Place::Attribute { base, attr }
+        }
+        "subscript_expression" => {
+            let base = node
+                .child_by_field_name("argument")
+                .and_then(|n| n.utf8_text(text.as_bytes()).ok())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let index = node
+                .child_by_field_name("index")
+                .and_then(|n| n.utf8_text(text.as_bytes()).ok())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            Place::Subscript { base, index }
+        }
+        "pointer_expression" | "unary_expression" => node
+            .named_child(0)
+            .map(|inner| normalize_lvalue(inner, text, scope_id))
+            .unwrap_or_else(|| Place::Unknown {
+                reason: "deref".to_string(),
+            }),
+        "identifier" => Place::Local {
+            scope_id: scope_id.to_string(),
+            name: node
+                .utf8_text(text.as_bytes())
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+        },
+        _ => {
+            let text = node.utf8_text(text.as_bytes()).unwrap_or("").trim();
+            Place::Local {
+                scope_id: scope_id.to_string(),
+                name: text.to_string(),
+            }
+        }
+    }
+}
+
+fn identifier_text(decl: Node, text: &str) -> Option<String> {
+    let mut current = Some(decl);
+    while let Some(node) = current {
+        match node.kind() {
+            "identifier" | "field_identifier" => {
+                return node.utf8_text(text.as_bytes()).ok().map(|s| s.to_string());
+            }
+            "pointer_declarator" | "array_declarator" | "function_declarator"
+            | "parenthesized_declarator" | "init_declarator" => {
+                current = node.child_by_field_name("declarator");
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn span_for(path: &str, text: &str, node: Node) -> SourceSpan {
