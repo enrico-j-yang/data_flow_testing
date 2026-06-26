@@ -378,16 +378,20 @@ pub fn write_def_use_hotspots_dot(cache: &AnalysisCache, path: &Path, top_n: usi
         ));
     }
 
+    let existing_edge_pairs = edges
+        .iter()
+        .map(|edge: &HotspotEdgeSpec| (edge.def_id.clone(), edge.use_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut added_same_line_pairs = BTreeSet::new();
+
     for ((_, _), (def_ids, use_ids)) in line_groups {
         if def_ids.is_empty() || use_ids.is_empty() {
             continue;
         }
         for def_id in &def_ids {
             for use_id in &use_ids {
-                let already_connected = edges
-                    .iter()
-                    .any(|edge| edge.def_id == *def_id && edge.use_id == *use_id);
-                if already_connected {
+                let pair = (def_id.clone(), use_id.clone());
+                if existing_edge_pairs.contains(&pair) || !added_same_line_pairs.insert(pair) {
                     continue;
                 }
                 edges.insert(HotspotEdgeSpec {
@@ -506,6 +510,36 @@ fn select_hotspot_seed_paths(cache: &AnalysisCache, top_n: usize) -> Vec<Hotspot
             .cmp(&def_sort_key(definitions_by_id.get(right)))
             .then_with(|| left.cmp(right))
     });
+
+    // Exhaustive DFS over every root would dominate runtime on large graphs.
+    // Keep the highest-fan-out roots (these produce the most informative
+    // hotspot paths) but cap the total roots explored.
+    let root_cap = HOTSPOT_ROOT_CAP.max(top_n.saturating_mul(8));
+    if root_def_ids.len() > root_cap {
+        let mut ranked = root_def_ids.clone();
+        ranked.sort_by(|left, right| {
+            let left_fan = fan_scores
+                .get(&HotspotTraversalNode::Def(left.clone()))
+                .copied()
+                .unwrap_or_default();
+            let right_fan = fan_scores
+                .get(&HotspotTraversalNode::Def(right.clone()))
+                .copied()
+                .unwrap_or_default();
+            right_fan
+                .cmp(&left_fan)
+                .then_with(|| {
+                    def_sort_key(definitions_by_id.get(left))
+                        .cmp(&def_sort_key(definitions_by_id.get(right)))
+                })
+                .then_with(|| left.cmp(right))
+        });
+        let allowed = ranked
+            .into_iter()
+            .take(root_cap)
+            .collect::<BTreeSet<_>>();
+        root_def_ids.retain(|def_id| allowed.contains(def_id));
+    }
 
     let mut length_paths = root_def_ids
         .iter()
@@ -679,6 +713,8 @@ fn select_best_hotspot_path(
     let mut node_sequence = Vec::new();
     let mut render_edges = Vec::new();
     let mut best = None;
+    // Bound exploration so dense graphs cannot blow up exhaustive DFS.
+    let mut step_budget: usize = HOTSPOT_PATH_STEP_BUDGET;
 
     visit_hotspot_paths(
         &root,
@@ -692,10 +728,15 @@ fn select_best_hotspot_path(
         &mut node_sequence,
         &mut render_edges,
         &mut best,
+        &mut step_budget,
     );
 
     best
 }
+
+const HOTSPOT_PATH_STEP_BUDGET: usize = 2048;
+const HOTSPOT_PATH_MAX_DEPTH: usize = 64;
+const HOTSPOT_ROOT_CAP: usize = 1024;
 
 #[allow(clippy::too_many_arguments)]
 fn visit_hotspot_paths(
@@ -710,32 +751,43 @@ fn visit_hotspot_paths(
     node_sequence: &mut Vec<HotspotTraversalNode>,
     render_edges: &mut Vec<HotspotEdgeSpec>,
     best: &mut Option<HotspotPathCandidate>,
+    step_budget: &mut usize,
 ) {
     visited.insert(current.clone());
     node_sequence.push(current.clone());
 
+    let depth_exceeded = node_sequence.len() >= HOTSPOT_PATH_MAX_DEPTH;
+    let budget_exhausted = *step_budget == 0;
     let mut explored_child = false;
-    if let Some(edges) = adjacency.get(current) {
-        for edge in edges {
-            if visited.contains(&edge.to) {
-                continue;
+
+    if !depth_exceeded && !budget_exhausted {
+        if let Some(edges) = adjacency.get(current) {
+            for edge in edges {
+                if *step_budget == 0 {
+                    break;
+                }
+                if visited.contains(&edge.to) {
+                    continue;
+                }
+                explored_child = true;
+                *step_budget -= 1;
+                render_edges.push(edge.render_edge.clone());
+                visit_hotspot_paths(
+                    &edge.to,
+                    root_def_id,
+                    mode,
+                    adjacency,
+                    fan_scores,
+                    definitions_by_id,
+                    uses_by_id,
+                    visited,
+                    node_sequence,
+                    render_edges,
+                    best,
+                    step_budget,
+                );
+                render_edges.pop();
             }
-            explored_child = true;
-            render_edges.push(edge.render_edge.clone());
-            visit_hotspot_paths(
-                &edge.to,
-                root_def_id,
-                mode,
-                adjacency,
-                fan_scores,
-                definitions_by_id,
-                uses_by_id,
-                visited,
-                node_sequence,
-                render_edges,
-                best,
-            );
-            render_edges.pop();
         }
     }
 
@@ -1296,16 +1348,38 @@ fn definition_precedes_use(definition: &crate::ir::Definition, use_site: &crate:
             && definition.span.end_col <= use_site.span.col)
 }
 
+fn build_definitions_by_place(
+    definitions: &[crate::ir::Definition],
+) -> BTreeMap<Place, Vec<&crate::ir::Definition>> {
+    let mut index: BTreeMap<Place, Vec<&crate::ir::Definition>> = BTreeMap::new();
+    for definition in definitions {
+        index
+            .entry(definition.place.clone())
+            .or_default()
+            .push(definition);
+    }
+    for bucket in index.values_mut() {
+        bucket.sort_by_key(|definition| (definition.span.end_line, definition.span.end_col));
+    }
+    index
+}
+
 fn latest_definition_ids_for_place(
     place: &Place,
     use_site: &crate::ir::Use,
-    definitions: &[crate::ir::Definition],
+    defs_by_place: &BTreeMap<Place, Vec<&crate::ir::Definition>>,
 ) -> Vec<String> {
+    let Some(bucket) = defs_by_place.get(place) else {
+        return Vec::new();
+    };
+
     let mut latest_position = None;
     let mut def_ids = Vec::new();
 
-    for definition in definitions {
-        if &definition.place != place || !definition_precedes_use(definition, use_site) {
+    // Buckets are sorted by (end_line, end_col); we still need to filter by
+    // "precedes use" because end position alone doesn't capture the column-on-line case.
+    for definition in bucket {
+        if !definition_precedes_use(definition, use_site) {
             continue;
         }
 
@@ -1367,6 +1441,7 @@ fn build_variable_dependency_selection(cache: &AnalysisCache) -> VariableDepende
         .iter()
         .map(|use_site| (use_site.use_id.clone(), use_site))
         .collect::<BTreeMap<_, _>>();
+    let defs_by_place = build_definitions_by_place(&cache.definitions);
     let exact_defined_scope_places = cache
         .definitions
         .iter()
@@ -1525,7 +1600,7 @@ fn build_variable_dependency_selection(cache: &AnalysisCache) -> VariableDepende
             let def_ids = latest_definition_ids_for_place(
                 &canonical_record.place,
                 use_site,
-                &cache.definitions,
+                &defs_by_place,
             );
             if def_ids.is_empty() {
                 None
@@ -2261,6 +2336,7 @@ pub fn write_var_dependency_dot(cache: &AnalysisCache, path: &Path, _top_n: usiz
         .iter()
         .map(|use_site| (use_site.use_id.clone(), use_site))
         .collect::<BTreeMap<_, _>>();
+    let defs_by_place = build_definitions_by_place(&cache.definitions);
     let exact_defined_scope_places = cache
         .definitions
         .iter()
@@ -2419,7 +2495,7 @@ pub fn write_var_dependency_dot(cache: &AnalysisCache, path: &Path, _top_n: usiz
             let def_ids = latest_definition_ids_for_place(
                 &canonical_record.place,
                 use_site,
-                &cache.definitions,
+                &defs_by_place,
             );
             if def_ids.is_empty() {
                 None
