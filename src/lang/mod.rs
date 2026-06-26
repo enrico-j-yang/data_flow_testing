@@ -1,3 +1,4 @@
+pub mod c;
 pub mod python;
 
 use crate::ir::AnalysisCache;
