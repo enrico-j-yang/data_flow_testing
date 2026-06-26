@@ -1,6 +1,8 @@
 use data_flow_analyzer::cbuild::{
     configure_cmake_projects, discover_cmake_projects, merge_compile_commands, CProject,
+    CompileCommand,
 };
+use data_flow_analyzer::ccompile::{build_preprocess_arguments, parse_line_markers};
 use data_flow_analyzer::config::AnalyzeConfig;
 use std::fs;
 use std::process::Command;
@@ -91,4 +93,49 @@ fn configure_cmake_projects_exports_compile_commands_for_simple_project() {
 
     assert_eq!(configured.len(), 1);
     assert!(configured[0].compile_commands_path.exists());
+}
+
+#[test]
+fn build_preprocess_arguments_rewrites_compile_invocation() {
+    let command = CompileCommand {
+        directory: std::path::PathBuf::from("/tmp/project"),
+        file: std::path::PathBuf::from("/tmp/project/main.c"),
+        arguments: vec![
+            "cc".to_string(),
+            "-Iinclude".to_string(),
+            "-DVALUE=1".to_string(),
+            "-c".to_string(),
+            "main.c".to_string(),
+            "-o".to_string(),
+            "main.o".to_string(),
+        ],
+        command: None,
+        output: Some(std::path::PathBuf::from("main.o")),
+    };
+
+    let args = build_preprocess_arguments(&command, std::path::Path::new("main.i")).unwrap();
+
+    assert_eq!(args[0], "cc");
+    assert!(args.iter().any(|arg| arg == "-E"));
+    assert!(args.iter().any(|arg| arg == "-Iinclude"));
+    assert!(args.iter().any(|arg| arg == "-DVALUE=1"));
+    assert!(!args.iter().any(|arg| arg == "-c"));
+    assert!(!args.iter().any(|arg| arg == "main.o"));
+    let out_index = args.iter().position(|arg| arg == "-o").unwrap();
+    assert_eq!(args[out_index + 1], "main.i");
+}
+
+#[test]
+fn parse_line_markers_maps_original_files() {
+    let text = "# 1 \"/tmp/project/main.c\"\nint main(void) {\n# 12 \"/tmp/project/include/value.h\"\n  return VALUE;\n# 3 \"/tmp/project/main.c\"\n}\n";
+
+    let markers = parse_line_markers(text);
+
+    assert_eq!(markers.len(), 3);
+    assert_eq!(markers[0].original_file, "/tmp/project/main.c");
+    assert_eq!(markers[0].original_line, 1);
+    assert_eq!(markers[1].original_file, "/tmp/project/include/value.h");
+    assert_eq!(markers[1].original_line, 12);
+    assert_eq!(markers[2].original_file, "/tmp/project/main.c");
+    assert_eq!(markers[2].original_line, 3);
 }
