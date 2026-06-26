@@ -15,6 +15,7 @@ use crate::source::SourceUnit;
 use crate::summaries::{build_initial_summaries, propagate_call_summaries};
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
+use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -173,17 +174,27 @@ fn analyze_c(cfg: &AnalyzeConfig) -> Result<AnalysisCache> {
         &merged_path,
     )?;
 
+    let total = compile_commands.len();
+    println!("preprocessing {total} translation units in parallel");
+    let counter = std::sync::atomic::AtomicUsize::new(0);
     let units = compile_commands
-        .iter()
+        .par_iter()
         .enumerate()
-        .filter_map(|(index, command)| match preprocess_compile_command(index, command, &preprocessed_dir) {
-            Ok(unit) => Some(unit),
-            Err(err) => {
-                eprintln!(
-                    "warning: failed to preprocess {}: {err:#}",
-                    command.file.display()
-                );
-                None
+        .filter_map(|(index, command)| {
+            let result = preprocess_compile_command(index, command, &preprocessed_dir);
+            let done = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if done % 50 == 0 || done == total {
+                eprintln!("  preprocessed {done}/{total}");
+            }
+            match result {
+                Ok(unit) => Some(unit),
+                Err(err) => {
+                    eprintln!(
+                        "warning: failed to preprocess {}: {err:#}",
+                        command.file.display()
+                    );
+                    None
+                }
             }
         })
         .collect::<Vec<_>>();
