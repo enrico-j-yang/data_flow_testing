@@ -45,6 +45,13 @@ pub fn discover_cmake_projects(config: &AnalyzeConfig) -> Result<Vec<CProject>> 
         if !entry.file_type().is_file() || entry.file_name() != OsStr::new("CMakeLists.txt") {
             continue;
         }
+        // Only treat a CMakeLists.txt as a project root if it actually
+        // declares a project. Nested CMakeLists that are only meant to be
+        // pulled in via add_subdirectory have no project() of their own and
+        // would fail to configure on their own.
+        if !contains_project_call(entry.path()) {
+            continue;
+        }
         let source_dir = entry
             .path()
             .parent()
@@ -61,6 +68,26 @@ pub fn discover_cmake_projects(config: &AnalyzeConfig) -> Result<Vec<CProject>> 
     Ok(projects)
 }
 
+fn contains_project_call(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        // Match `project(` and `project (` while skipping commented variants.
+        if let Some(rest) = trimmed.strip_prefix("project") {
+            let rest = rest.trim_start();
+            if rest.starts_with('(') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn configure_cmake_projects(
     projects: &[CProject],
     config: &AnalyzeConfig,
@@ -72,6 +99,7 @@ pub fn configure_cmake_projects(
     fs::create_dir_all(&build_root)?;
 
     let mut configured = Vec::new();
+    let mut failures: Vec<(PathBuf, String)> = Vec::new();
     for project in projects {
         let build_dir = build_root.join(project.relative_name.replace('/', "__"));
         fs::create_dir_all(&build_dir)?;
@@ -89,23 +117,42 @@ pub fn configure_cmake_projects(
 
         let output = command.output().with_context(|| {
             format!(
-                "failed to configure cmake project {}",
+                "failed to spawn cmake for {}",
                 project.source_dir.display()
             )
         })?;
         if !output.status.success() {
-            bail!(
-                "cmake configure failed for {}:\n{}",
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            eprintln!(
+                "warning: cmake configure failed for {}\n{}",
                 project.source_dir.display(),
-                String::from_utf8_lossy(&output.stderr)
+                stderr.lines().take(20).collect::<Vec<_>>().join("\n")
             );
+            failures.push((project.source_dir.clone(), stderr));
+            continue;
+        }
+
+        let compile_commands_path = build_dir.join("compile_commands.json");
+        if !compile_commands_path.exists() {
+            eprintln!(
+                "warning: cmake configured {} but no compile_commands.json produced",
+                project.source_dir.display()
+            );
+            continue;
         }
 
         configured.push(ConfiguredProject {
             project: project.clone(),
             build_dir: build_dir.clone(),
-            compile_commands_path: build_dir.join("compile_commands.json"),
+            compile_commands_path,
         });
+    }
+
+    if configured.is_empty() {
+        bail!(
+            "no CMake projects could be configured (failures: {})",
+            failures.len()
+        );
     }
 
     Ok(configured)
