@@ -74,3 +74,95 @@ int bump(int delta) {
             )
     }));
 }
+
+#[test]
+fn c_frontend_normalizes_field_and_subscript_places() {
+    let cache = parse_c(
+        r#"
+struct Item { int value; };
+
+int read_item(struct Item *item, int index, int *values) {
+    item->value = values[index];
+    return item->value;
+}
+"#,
+    );
+
+    assert!(
+        cache.definitions.iter().any(|definition| {
+            matches!(
+                &definition.place,
+                Place::Attribute { base, attr }
+                    if base == "item" && attr == "value"
+            )
+        }),
+        "expected an attribute definition for item->value, got: {:?}",
+        cache.definitions.iter().map(|d| &d.place).collect::<Vec<_>>(),
+    );
+    assert!(
+        cache.uses.iter().any(|use_site| {
+            matches!(
+                &use_site.place,
+                Place::Subscript { base, index }
+                    if base == "values" && index == "index"
+            )
+        }),
+        "expected a subscript use of values[index], got: {:?}",
+        cache.uses.iter().map(|u| &u.place).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn c_frontend_records_calls_and_emits_cfg() {
+    let cache = parse_c(
+        r#"
+int helper(int value) { return value; }
+
+int run(int value, int (*fn_ptr)(int)) {
+    if (value > 0) {
+        value = helper(value);
+    } else {
+        value = fn_ptr(value);
+    }
+    while (value > 10) {
+        value = value - 1;
+    }
+    return value;
+}
+"#,
+    );
+
+    let run_fn = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "run")
+        .expect("run function recorded");
+    let cfg = cache
+        .cfgs
+        .iter()
+        .find(|cfg| cfg.function_id == run_fn.function_id)
+        .expect("cfg recorded for run");
+
+    assert!(
+        cache.calls.iter().any(|call| call.callee_expr == "helper"),
+        "expected a call to helper, got: {:?}",
+        cache.calls.iter().map(|c| &c.callee_expr).collect::<Vec<_>>(),
+    );
+    assert!(
+        cache.calls.iter().any(|call| call.callee_expr == "fn_ptr"),
+        "expected an indirect call via fn_ptr, got: {:?}",
+        cache.calls.iter().map(|c| &c.callee_expr).collect::<Vec<_>>(),
+    );
+    assert!(
+        cfg.edges.iter().any(|edge| edge.edge_kind == "branch-true"),
+        "expected branch-true edge in cfg"
+    );
+    assert!(
+        cfg.edges.iter().any(|edge| edge.edge_kind == "branch-false"),
+        "expected branch-false edge in cfg"
+    );
+    assert!(
+        cfg.edges.iter().any(|edge| edge.edge_kind == "loop-back"),
+        "expected loop-back edge in cfg"
+    );
+}
