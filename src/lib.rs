@@ -1,6 +1,7 @@
 pub mod alias;
 pub mod analysis;
 pub mod cbuild;
+pub mod ccompile;
 pub mod cfg;
 pub mod cli;
 pub mod config;

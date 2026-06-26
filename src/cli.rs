@@ -2,7 +2,6 @@ use crate::analysis::{compute_def_use_edges, compute_var_dependencies};
 use crate::config::AnalyzeConfig;
 use crate::fs::discover_sources;
 use crate::imports::resolve_imports;
-use crate::lang::LanguageFrontend;
 use crate::lang::python::PythonFrontend;
 use crate::paths::{PathQueryOptions, query_function_paths};
 use crate::report::write_report;
