@@ -129,25 +129,25 @@ pub fn propagate_call_summaries(cache: &mut AnalysisCache) {
 
             summary_by_id.insert(caller_id.clone(), dedup_summary(updated));
 
-            if let Some(target_def_id) = &call.return_target_def_id {
-                if let Some(target_place) = defs_by_id.get(target_def_id) {
-                    for arg_use_id in &call.arg_use_ids {
-                        if let Some(source_place) = uses_by_id.get(arg_use_id) {
-                            let edge = VarDependencyEdge {
-                                edge_id: stable_id(
-                                    "VD",
-                                    SCHEMA_VERSION,
-                                    &[arg_use_id, target_def_id, &call.call_id],
-                                ),
-                                source_place: source_place.clone(),
-                                target_place: target_place.clone(),
-                                source_id: arg_use_id.clone(),
-                                target_id: target_def_id.clone(),
-                                dep_kind: "call-return".to_string(),
-                                span: call.span.clone(),
-                            };
-                            propagated_edges.insert(edge.edge_id.clone(), edge);
-                        }
+            if let Some(target_def_id) = &call.return_target_def_id
+                && let Some(target_place) = defs_by_id.get(target_def_id)
+            {
+                for arg_use_id in &call.arg_use_ids {
+                    if let Some(source_place) = uses_by_id.get(arg_use_id) {
+                        let edge = VarDependencyEdge {
+                            edge_id: stable_id(
+                                "VD",
+                                SCHEMA_VERSION,
+                                &[arg_use_id, target_def_id, &call.call_id],
+                            ),
+                            source_place: source_place.clone(),
+                            target_place: target_place.clone(),
+                            source_id: arg_use_id.clone(),
+                            target_id: target_def_id.clone(),
+                            dep_kind: "call-return".to_string(),
+                            span: call.span.clone(),
+                        };
+                        propagated_edges.insert(edge.edge_id.clone(), edge);
                     }
                 }
             }

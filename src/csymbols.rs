@@ -97,7 +97,10 @@ mod tests {
         let mut cache = make_cache();
         resolve_c_symbols(&mut cache);
         assert_eq!(cache.calls[0].resolution, "project-local");
-        assert_eq!(cache.calls[0].candidate_function_ids, vec!["F_helper".to_string()]);
+        assert_eq!(
+            cache.calls[0].candidate_function_ids,
+            vec!["F_helper".to_string()]
+        );
         assert_eq!(cache.calls[1].resolution, "indirect");
         assert_eq!(cache.calls[2].resolution, "external");
     }

@@ -158,6 +158,7 @@ fn candidate_pairs(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bounded_walk(
     cache: &AnalysisCache,
     cfg: &CfgRecord,
@@ -261,6 +262,7 @@ struct WalkState<'a> {
 }
 
 impl WalkState<'_> {
+    #[allow(clippy::too_many_arguments)]
     fn dfs(
         &mut self,
         adjacency: &BTreeMap<String, Vec<&crate::ir::CfgEdge>>,
@@ -391,11 +393,10 @@ fn is_def_clear_path(
                 .definitions
                 .iter()
                 .find(|other_definition| other_definition.def_id == statement_id)
+                && other_definition.place == *place
+                && other_definition.def_id != definition.def_id
             {
-                if other_definition.place == *place && other_definition.def_id != definition.def_id
-                {
-                    return false;
-                }
+                return false;
             }
         }
     }

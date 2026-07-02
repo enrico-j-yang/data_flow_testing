@@ -151,10 +151,7 @@ fn analyze_python(cfg: &AnalyzeConfig) -> Result<AnalysisCache> {
 fn analyze_c(cfg: &AnalyzeConfig) -> Result<AnalysisCache> {
     let projects = discover_cmake_projects(cfg)?;
     if projects.is_empty() {
-        bail!(
-            "no CMake projects found under {}",
-            cfg.input.display()
-        );
+        bail!("no CMake projects found under {}", cfg.input.display());
     }
     let configured = configure_cmake_projects(&projects, cfg)?;
     let merged_path = cfg.out.join("data/compile_commands.merged.json");
@@ -183,7 +180,7 @@ fn analyze_c(cfg: &AnalyzeConfig) -> Result<AnalysisCache> {
         .filter_map(|(index, command)| {
             let result = preprocess_compile_command(index, command, &preprocessed_dir);
             let done = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if done % 50 == 0 || done == total {
+            if done.is_multiple_of(50) || done == total {
                 eprintln!("  preprocessed {done}/{total}");
             }
             match result {
@@ -232,9 +229,12 @@ fn preprocess_compile_command(
     let args = build_preprocess_arguments(command, &preprocessed)?;
     let mut cmd = std::process::Command::new(&args[0]);
     cmd.args(&args[1..]).current_dir(&command.directory);
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to spawn preprocessor for {}", command.file.display()))?;
+    let output = cmd.output().with_context(|| {
+        format!(
+            "failed to spawn preprocessor for {}",
+            command.file.display()
+        )
+    })?;
     if !output.status.success() {
         bail!(
             "preprocess failed for {}: {}",

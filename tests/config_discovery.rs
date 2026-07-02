@@ -27,7 +27,14 @@ stub_paths = ["stubs"]
     .unwrap();
 
     let mut cfg = AnalyzeConfig::from_toml_file(&cfg_path).unwrap();
-    cfg.apply_cli_overrides(None, None, Some(dir.path().join("override_out")), None, Vec::new(), false);
+    cfg.apply_cli_overrides(
+        None,
+        None,
+        Some(dir.path().join("override_out")),
+        None,
+        Vec::new(),
+        false,
+    );
 
     assert_eq!(cfg.lang, "python");
     assert_eq!(cfg.max_loop_unroll, 2);
