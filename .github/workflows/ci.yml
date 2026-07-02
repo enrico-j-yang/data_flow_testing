@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # gcc is pre-installed on ubuntu-latest, so the tree-sitter build script
+      # (cc-rs) compiles without any extra toolchain setup.
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  build-test:
+    name: build & test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The C-analysis tests configure CMake projects and run the analyzer's
+      # preprocessor, which uses gcc/clang-style flags (-E -o -I -D). MSVC's
+      # cl.exe cannot serve that role, so on Windows we drive clang (pre-
+      # installed on windows-latest) with the MSVC dev-shell active for linking.
+      # Real LLVM clang accepts the full x86_64-pc-windows-msvc triple that
+      # cc-rs emits, so no wrapper shim is needed. CMAKE_GENERATOR=Ninja is
+      # required on Windows because the default Visual Studio generator does
+      # not honor CMAKE_EXPORT_COMPILE_COMMANDS.
+      - name: Set up MSVC dev shell (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-shell@v1
+        with:
+          arch: x64
+
+      - name: Configure C toolchain
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "CC=clang"        >> "$GITHUB_ENV"
+            echo "CXX=clang++"     >> "$GITHUB_ENV"
+          else
+            echo "CC=gcc"          >> "$GITHUB_ENV"
+            echo "CXX=g++"         >> "$GITHUB_ENV"
+          fi
+          echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      - name: cargo test
+        run: cargo test --no-fail-fast
+
+      - name: Upload release binary
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-flow-analyzer-${{ runner.os == 'Windows' && 'windows' || 'linux' }}
+          path: target/release/data-flow-analyzer${{ runner.os == 'Windows' && '.exe' || '' }}
+          if-no-files-found: error
