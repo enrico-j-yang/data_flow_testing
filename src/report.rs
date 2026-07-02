@@ -15,19 +15,34 @@ pub fn write_report(cache: &AnalysisCache, out: &Path, top_n: usize) -> Result<(
 
     let t0 = std::time::Instant::now();
     write_cache(cache, &out.join("data/analysis-cache.json"))?;
-    eprintln!("  report: cache.json    {:>6.1}s", t0.elapsed().as_secs_f32());
+    eprintln!(
+        "  report: cache.json    {:>6.1}s",
+        t0.elapsed().as_secs_f32()
+    );
     let t = std::time::Instant::now();
     write_csvs(cache, &out.join("data"))?;
-    eprintln!("  report: csvs          {:>6.1}s", t.elapsed().as_secs_f32());
+    eprintln!(
+        "  report: csvs          {:>6.1}s",
+        t.elapsed().as_secs_f32()
+    );
     let t = std::time::Instant::now();
     let graphs = write_graphs(cache, &out.join("graphs"), top_n)?;
-    eprintln!("  report: graphs        {:>6.1}s", t.elapsed().as_secs_f32());
+    eprintln!(
+        "  report: graphs        {:>6.1}s",
+        t.elapsed().as_secs_f32()
+    );
     let t = std::time::Instant::now();
     write_index(cache, out, &graphs)?;
-    eprintln!("  report: index.html    {:>6.1}s", t.elapsed().as_secs_f32());
+    eprintln!(
+        "  report: index.html    {:>6.1}s",
+        t.elapsed().as_secs_f32()
+    );
     let t = std::time::Instant::now();
     write_stylesheet(out)?;
-    eprintln!("  report: stylesheet    {:>6.1}s", t.elapsed().as_secs_f32());
+    eprintln!(
+        "  report: stylesheet    {:>6.1}s",
+        t.elapsed().as_secs_f32()
+    );
     Ok(())
 }
 

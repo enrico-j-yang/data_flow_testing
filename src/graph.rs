@@ -534,10 +534,7 @@ fn select_hotspot_seed_paths(cache: &AnalysisCache, top_n: usize) -> Vec<Hotspot
                 })
                 .then_with(|| left.cmp(right))
         });
-        let allowed = ranked
-            .into_iter()
-            .take(root_cap)
-            .collect::<BTreeSet<_>>();
+        let allowed = ranked.into_iter().take(root_cap).collect::<BTreeSet<_>>();
         root_def_ids.retain(|def_id| allowed.contains(def_id));
     }
 
@@ -738,7 +735,7 @@ const HOTSPOT_PATH_STEP_BUDGET: usize = 2048;
 const HOTSPOT_PATH_MAX_DEPTH: usize = 64;
 const HOTSPOT_ROOT_CAP: usize = 1024;
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
 fn visit_hotspot_paths(
     current: &HotspotTraversalNode,
     root_def_id: &str,
@@ -760,34 +757,35 @@ fn visit_hotspot_paths(
     let budget_exhausted = *step_budget == 0;
     let mut explored_child = false;
 
-    if !depth_exceeded && !budget_exhausted {
-        if let Some(edges) = adjacency.get(current) {
-            for edge in edges {
-                if *step_budget == 0 {
-                    break;
-                }
-                if visited.contains(&edge.to) {
-                    continue;
-                }
-                explored_child = true;
-                *step_budget -= 1;
-                render_edges.push(edge.render_edge.clone());
-                visit_hotspot_paths(
-                    &edge.to,
-                    root_def_id,
-                    mode,
-                    adjacency,
-                    fan_scores,
-                    definitions_by_id,
-                    uses_by_id,
-                    visited,
-                    node_sequence,
-                    render_edges,
-                    best,
-                    step_budget,
-                );
-                render_edges.pop();
+    if !depth_exceeded
+        && !budget_exhausted
+        && let Some(edges) = adjacency.get(current)
+    {
+        for edge in edges {
+            if *step_budget == 0 {
+                break;
             }
+            if visited.contains(&edge.to) {
+                continue;
+            }
+            explored_child = true;
+            *step_budget -= 1;
+            render_edges.push(edge.render_edge.clone());
+            visit_hotspot_paths(
+                &edge.to,
+                root_def_id,
+                mode,
+                adjacency,
+                fan_scores,
+                definitions_by_id,
+                uses_by_id,
+                visited,
+                node_sequence,
+                render_edges,
+                best,
+                step_budget,
+            );
+            render_edges.pop();
         }
     }
 
@@ -1586,22 +1584,16 @@ fn build_variable_dependency_selection(cache: &AnalysisCache) -> VariableDepende
         .uses
         .iter()
         .filter_map(|use_site| {
-            let Some((canonical_node_id, canonical_record)) =
-                canonical_use_records.get(&use_site.use_id)
-            else {
-                return None;
-            };
+            let (canonical_node_id, canonical_record) =
+                canonical_use_records.get(&use_site.use_id)?;
             if canonical_node_id == &use_site.use_id
                 || def_use_edges_by_use_id.contains_key(&use_site.use_id)
             {
                 return None;
             }
 
-            let def_ids = latest_definition_ids_for_place(
-                &canonical_record.place,
-                use_site,
-                &defs_by_place,
-            );
+            let def_ids =
+                latest_definition_ids_for_place(&canonical_record.place, use_site, &defs_by_place);
             if def_ids.is_empty() {
                 None
             } else {
@@ -1981,10 +1973,10 @@ fn variable_dependency_node_owner(
     record: &DefUseNodeRecord,
     labels: &PlaceLabelContext,
 ) -> (String, Option<String>) {
-    if let Some(scope_id) = record.scope_id.as_deref() {
-        if let Some(scope_label) = labels.scope_label(scope_id) {
-            return split_scope_label(&scope_label);
-        }
+    if let Some(scope_id) = record.scope_id.as_deref()
+        && let Some(scope_label) = labels.scope_label(scope_id)
+    {
+        return split_scope_label(&scope_label);
     }
 
     if let Place::Global { module_id, .. } = &record.place {
@@ -2481,22 +2473,16 @@ pub fn write_var_dependency_dot(cache: &AnalysisCache, path: &Path, _top_n: usiz
         .uses
         .iter()
         .filter_map(|use_site| {
-            let Some((canonical_node_id, canonical_record)) =
-                canonical_use_records.get(&use_site.use_id)
-            else {
-                return None;
-            };
+            let (canonical_node_id, canonical_record) =
+                canonical_use_records.get(&use_site.use_id)?;
             if canonical_node_id == &use_site.use_id
                 || def_use_edges_by_use_id.contains_key(&use_site.use_id)
             {
                 return None;
             }
 
-            let def_ids = latest_definition_ids_for_place(
-                &canonical_record.place,
-                use_site,
-                &defs_by_place,
-            );
+            let def_ids =
+                latest_definition_ids_for_place(&canonical_record.place, use_site, &defs_by_place);
             if def_ids.is_empty() {
                 None
             } else {
@@ -2825,10 +2811,10 @@ pub fn write_var_dependency_dot(cache: &AnalysisCache, path: &Path, _top_n: usiz
 }
 
 #[cfg(test)]
-fn select_var_dependency_seed_edges<'a>(
-    cache: &'a AnalysisCache,
+fn select_var_dependency_seed_edges(
+    cache: &AnalysisCache,
     top_n: usize,
-) -> Vec<&'a crate::ir::VarDependencyEdge> {
+) -> Vec<&crate::ir::VarDependencyEdge> {
     if top_n == 0 {
         return Vec::new();
     }
@@ -2963,6 +2949,7 @@ fn select_var_dependency_seed_edges<'a>(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn select_var_dependency_bundle_with_source_closure<'a>(
     seed_target_id: &str,
     bundles: &mut BTreeMap<String, Vec<&'a crate::ir::VarDependencyEdge>>,

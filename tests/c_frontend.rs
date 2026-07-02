@@ -97,7 +97,11 @@ int read_item(struct Item *item, int index, int *values) {
             )
         }),
         "expected an attribute definition for item->value, got: {:?}",
-        cache.definitions.iter().map(|d| &d.place).collect::<Vec<_>>(),
+        cache
+            .definitions
+            .iter()
+            .map(|d| &d.place)
+            .collect::<Vec<_>>(),
     );
     assert!(
         cache.uses.iter().any(|use_site| {
@@ -146,19 +150,29 @@ int run(int value, int (*fn_ptr)(int)) {
     assert!(
         cache.calls.iter().any(|call| call.callee_expr == "helper"),
         "expected a call to helper, got: {:?}",
-        cache.calls.iter().map(|c| &c.callee_expr).collect::<Vec<_>>(),
+        cache
+            .calls
+            .iter()
+            .map(|c| &c.callee_expr)
+            .collect::<Vec<_>>(),
     );
     assert!(
         cache.calls.iter().any(|call| call.callee_expr == "fn_ptr"),
         "expected an indirect call via fn_ptr, got: {:?}",
-        cache.calls.iter().map(|c| &c.callee_expr).collect::<Vec<_>>(),
+        cache
+            .calls
+            .iter()
+            .map(|c| &c.callee_expr)
+            .collect::<Vec<_>>(),
     );
     assert!(
         cfg.edges.iter().any(|edge| edge.edge_kind == "branch-true"),
         "expected branch-true edge in cfg"
     );
     assert!(
-        cfg.edges.iter().any(|edge| edge.edge_kind == "branch-false"),
+        cfg.edges
+            .iter()
+            .any(|edge| edge.edge_kind == "branch-false"),
         "expected branch-false edge in cfg"
     );
     assert!(

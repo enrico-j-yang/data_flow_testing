@@ -3,7 +3,6 @@ use data_flow_analyzer::config::AnalyzeConfig;
 use data_flow_analyzer::fs::{SourceFile, discover_sources};
 use data_flow_analyzer::imports::resolve_imports;
 use data_flow_analyzer::ir::{AnalysisCache, Place};
-use data_flow_analyzer::lang::LanguageFrontend;
 use data_flow_analyzer::lang::python::PythonFrontend;
 use data_flow_analyzer::paths::{PathQueryOptions, query_function_paths};
 use std::fs;

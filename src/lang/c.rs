@@ -157,7 +157,9 @@ fn param_name(param: Node, text: &str) -> Option<String> {
             "identifier" => {
                 return node.utf8_text(text.as_bytes()).ok().map(|s| s.to_string());
             }
-            "pointer_declarator" | "array_declarator" | "function_declarator"
+            "pointer_declarator"
+            | "array_declarator"
+            | "function_declarator"
             | "parenthesized_declarator" => {
                 current = node.child_by_field_name("declarator");
             }
@@ -221,7 +223,16 @@ fn lower_function(path: &str, text: &str, module_id: &str, node: Node, cache: &m
     let exit_id = cfg.exit_block_id.clone();
     cfg.add_edge(&entry_id, &body_block, "sequence", "entry");
 
-    lower_function_body(path, text, node, &function_id, &scope_id, &body_block, &mut cfg, cache);
+    lower_function_body(
+        path,
+        text,
+        node,
+        &function_id,
+        &scope_id,
+        &body_block,
+        &mut cfg,
+        cache,
+    );
 
     cfg.add_edge(&body_block, &exit_id, "sequence", "exit");
     cache.cfgs.push(cfg.into_record());
@@ -263,6 +274,7 @@ fn lower_global(path: &str, text: &str, module_id: &str, node: Node, cache: &mut
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_function_body(
     path: &str,
     text: &str,
@@ -278,10 +290,20 @@ fn lower_function_body(
     };
     let mut cursor = body.walk();
     for child in body.named_children(&mut cursor) {
-        lower_statement(path, text, child, function_id, scope_id, block_id, cfg, cache);
+        lower_statement(
+            path,
+            text,
+            child,
+            function_id,
+            scope_id,
+            block_id,
+            cfg,
+            cache,
+        );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_statement(
     path: &str,
     text: &str,
@@ -300,26 +322,65 @@ fn lower_statement(
         "return_statement" => {
             lower_return_statement(path, text, node, function_id, scope_id, cache)
         }
-        "if_statement" => {
-            lower_if_statement(path, text, node, function_id, scope_id, block_id, cfg, cache)
-        }
-        "while_statement" | "do_statement" => {
-            lower_while_statement(path, text, node, function_id, scope_id, block_id, cfg, cache)
-        }
-        "for_statement" => {
-            lower_for_statement(path, text, node, function_id, scope_id, block_id, cfg, cache)
-        }
+        "if_statement" => lower_if_statement(
+            path,
+            text,
+            node,
+            function_id,
+            scope_id,
+            block_id,
+            cfg,
+            cache,
+        ),
+        "while_statement" | "do_statement" => lower_while_statement(
+            path,
+            text,
+            node,
+            function_id,
+            scope_id,
+            block_id,
+            cfg,
+            cache,
+        ),
+        "for_statement" => lower_for_statement(
+            path,
+            text,
+            node,
+            function_id,
+            scope_id,
+            block_id,
+            cfg,
+            cache,
+        ),
         "compound_statement" => {
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                lower_statement(path, text, child, function_id, scope_id, block_id, cfg, cache);
+                lower_statement(
+                    path,
+                    text,
+                    child,
+                    function_id,
+                    scope_id,
+                    block_id,
+                    cfg,
+                    cache,
+                );
             }
         }
         _ => {
             // Still scan deeper for nested calls or assignments inside unknown constructs.
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                lower_statement(path, text, child, function_id, scope_id, block_id, cfg, cache);
+                lower_statement(
+                    path,
+                    text,
+                    child,
+                    function_id,
+                    scope_id,
+                    block_id,
+                    cfg,
+                    cache,
+                );
             }
         }
     }
@@ -354,14 +415,8 @@ fn lower_local_declaration(
             .trim()
             .to_string();
         let span = span_for(path, text, child);
-        let rhs_uses = collect_expression_uses(
-            path,
-            text,
-            value,
-            function_id,
-            scope_id,
-            "assign:rhs",
-        );
+        let rhs_uses =
+            collect_expression_uses(path, text, value, function_id, scope_id, "assign:rhs");
         cache.definitions.push(Definition {
             def_id: stable_id("D", SCHEMA_VERSION, &[function_id, &name, &snippet]),
             place: Place::Local {
@@ -377,7 +432,10 @@ fn lower_local_declaration(
                 .unwrap_or("")
                 .trim()
                 .to_string(),
-            deps: rhs_uses.iter().map(|use_site| use_site.place.clone()).collect(),
+            deps: rhs_uses
+                .iter()
+                .map(|use_site| use_site.place.clone())
+                .collect(),
         });
         let def_id_for_call = cache
             .definitions
@@ -387,11 +445,19 @@ fn lower_local_declaration(
             cache.uses.push(use_site);
         }
         if value.kind() == "call_expression" {
-            lower_call(path, text, value, function_id, scope_id, cache, "assign:rhs");
-            if let (Some(def_id), Some(last_call)) = (def_id_for_call, cache.calls.last_mut()) {
-                if last_call.return_target_def_id.is_none() {
-                    last_call.return_target_def_id = Some(def_id);
-                }
+            lower_call(
+                path,
+                text,
+                value,
+                function_id,
+                scope_id,
+                cache,
+                "assign:rhs",
+            );
+            if let (Some(def_id), Some(last_call)) = (def_id_for_call, cache.calls.last_mut())
+                && last_call.return_target_def_id.is_none()
+            {
+                last_call.return_target_def_id = Some(def_id);
             }
         }
     }
@@ -446,7 +512,10 @@ fn lower_expression(
                 function_id: Some(function_id.to_string()),
                 span: span.clone(),
                 expr: rhs_text.to_string(),
-                deps: rhs_uses.iter().map(|use_site| use_site.place.clone()).collect(),
+                deps: rhs_uses
+                    .iter()
+                    .map(|use_site| use_site.place.clone())
+                    .collect(),
             });
             for use_site in rhs_uses {
                 cache.uses.push(use_site);
@@ -454,11 +523,19 @@ fn lower_expression(
             // If the RHS is a direct call expression, lower it as a call and
             // wire the call's return_target_def_id to this assignment.
             if right.kind() == "call_expression" {
-                lower_call(path, text, right, function_id, scope_id, cache, "assign:rhs");
-                if let Some(last_call) = cache.calls.last_mut() {
-                    if last_call.return_target_def_id.is_none() {
-                        last_call.return_target_def_id = Some(call_target_def_id);
-                    }
+                lower_call(
+                    path,
+                    text,
+                    right,
+                    function_id,
+                    scope_id,
+                    cache,
+                    "assign:rhs",
+                );
+                if let Some(last_call) = cache.calls.last_mut()
+                    && last_call.return_target_def_id.is_none()
+                {
+                    last_call.return_target_def_id = Some(call_target_def_id);
                 }
             }
         }
@@ -468,9 +545,9 @@ fn lower_expression(
         _ => {
             // For other expression statements (e.g. ++x, function()), still
             // collect any sub-expression uses and call records.
-            for use_site in collect_expression_uses(
-                path, text, expr, function_id, scope_id, context,
-            ) {
+            for use_site in
+                collect_expression_uses(path, text, expr, function_id, scope_id, context)
+            {
                 cache.uses.push(use_site);
             }
         }
@@ -498,14 +575,9 @@ fn lower_call(
     if let Some(arguments) = arguments {
         let mut cursor = arguments.walk();
         for arg in arguments.named_children(&mut cursor) {
-            for use_site in collect_expression_uses(
-                path,
-                text,
-                arg,
-                function_id,
-                scope_id,
-                "call:arg",
-            ) {
+            for use_site in
+                collect_expression_uses(path, text, arg, function_id, scope_id, "call:arg")
+            {
                 arg_use_ids.push(use_site.use_id.clone());
                 cache.uses.push(use_site);
             }
@@ -581,6 +653,7 @@ fn lower_nested_calls(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_if_statement(
     path: &str,
     text: &str,
@@ -597,27 +670,46 @@ fn lower_if_statement(
     cfg.add_edge(block_id, &then_block, "branch-true", "if");
     cfg.add_edge(block_id, &else_block, "branch-false", "else");
     if let Some(condition) = node.child_by_field_name("condition") {
-        for use_site in collect_expression_uses(
-            path, text, condition, function_id, scope_id, "if:cond",
-        ) {
+        for use_site in
+            collect_expression_uses(path, text, condition, function_id, scope_id, "if:cond")
+        {
             cache.uses.push(use_site);
         }
     }
     if let Some(consequence) = node.child_by_field_name("consequence") {
         let mut cursor = consequence.walk();
         for child in consequence.named_children(&mut cursor) {
-            lower_statement(path, text, child, function_id, scope_id, &then_block, cfg, cache);
+            lower_statement(
+                path,
+                text,
+                child,
+                function_id,
+                scope_id,
+                &then_block,
+                cfg,
+                cache,
+            );
         }
     }
     if let Some(alternative) = node.child_by_field_name("alternative") {
         let target = alternative.named_child(0).unwrap_or(alternative);
         let mut cursor = target.walk();
         for child in target.named_children(&mut cursor) {
-            lower_statement(path, text, child, function_id, scope_id, &else_block, cfg, cache);
+            lower_statement(
+                path,
+                text,
+                child,
+                function_id,
+                scope_id,
+                &else_block,
+                cfg,
+                cache,
+            );
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_while_statement(
     path: &str,
     text: &str,
@@ -633,20 +725,30 @@ fn lower_while_statement(
     cfg.add_edge(block_id, &loop_block, "loop-enter", "while");
     cfg.add_edge(&loop_block, &loop_block, "loop-back", "while");
     if let Some(condition) = node.child_by_field_name("condition") {
-        for use_site in collect_expression_uses(
-            path, text, condition, function_id, scope_id, "while:cond",
-        ) {
+        for use_site in
+            collect_expression_uses(path, text, condition, function_id, scope_id, "while:cond")
+        {
             cache.uses.push(use_site);
         }
     }
     if let Some(body) = node.child_by_field_name("body") {
         let mut cursor = body.walk();
         for child in body.named_children(&mut cursor) {
-            lower_statement(path, text, child, function_id, scope_id, &loop_block, cfg, cache);
+            lower_statement(
+                path,
+                text,
+                child,
+                function_id,
+                scope_id,
+                &loop_block,
+                cfg,
+                cache,
+            );
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_for_statement(
     path: &str,
     text: &str,
@@ -664,7 +766,16 @@ fn lower_for_statement(
     if let Some(body) = node.child_by_field_name("body") {
         let mut cursor = body.walk();
         for child in body.named_children(&mut cursor) {
-            lower_statement(path, text, child, function_id, scope_id, &loop_block, cfg, cache);
+            lower_statement(
+                path,
+                text,
+                child,
+                function_id,
+                scope_id,
+                &loop_block,
+                cfg,
+                cache,
+            );
         }
     }
 }
@@ -727,11 +838,7 @@ fn walk_expression(
                 .trim()
                 .to_string();
             uses.push(Use {
-                use_id: stable_id(
-                    "U",
-                    SCHEMA_VERSION,
-                    &[function_id, &base, &attr, context],
-                ),
+                use_id: stable_id("U", SCHEMA_VERSION, &[function_id, &base, &attr, context]),
                 place: Place::Attribute {
                     base: base.clone(),
                     attr: attr.clone(),
@@ -757,11 +864,7 @@ fn walk_expression(
                 .trim()
                 .to_string();
             uses.push(Use {
-                use_id: stable_id(
-                    "U",
-                    SCHEMA_VERSION,
-                    &[function_id, &base, &index, context],
-                ),
+                use_id: stable_id("U", SCHEMA_VERSION, &[function_id, &base, &index, context]),
                 place: Place::Subscript {
                     base: base.clone(),
                     index: index.clone(),
@@ -775,15 +878,7 @@ fn walk_expression(
             // Also emit a Use for the index expression itself so var-dep
             // analysis can see the dependency on `i`/`index`.
             if let Some(index_node) = index_node {
-                walk_expression(
-                    path,
-                    text,
-                    index_node,
-                    function_id,
-                    scope_id,
-                    context,
-                    uses,
-                );
+                walk_expression(path, text, index_node, function_id, scope_id, context, uses);
             }
         }
         "call_expression" => {
@@ -876,8 +971,11 @@ fn identifier_text(decl: Node, text: &str) -> Option<String> {
             "identifier" | "field_identifier" => {
                 return node.utf8_text(text.as_bytes()).ok().map(|s| s.to_string());
             }
-            "pointer_declarator" | "array_declarator" | "function_declarator"
-            | "parenthesized_declarator" | "init_declarator" => {
+            "pointer_declarator"
+            | "array_declarator"
+            | "function_declarator"
+            | "parenthesized_declarator"
+            | "init_declarator" => {
                 current = node.child_by_field_name("declarator");
             }
             _ => return None,

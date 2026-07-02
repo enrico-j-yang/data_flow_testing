@@ -1,6 +1,6 @@
 use data_flow_analyzer::cbuild::{
-    configure_cmake_projects, discover_cmake_projects, merge_compile_commands, CProject,
-    CompileCommand,
+    CProject, CompileCommand, configure_cmake_projects, discover_cmake_projects,
+    merge_compile_commands,
 };
 use data_flow_analyzer::ccompile::{build_preprocess_arguments, parse_line_markers};
 use data_flow_analyzer::config::AnalyzeConfig;

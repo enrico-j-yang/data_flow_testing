@@ -193,9 +193,11 @@ fn paths_query_path_uses_cache_parent_dir() {
         .assert()
         .success();
 
-    assert!(cache_path
-        .parent()
-        .unwrap()
-        .join("path-query.json")
-        .exists());
+    assert!(
+        cache_path
+            .parent()
+            .unwrap()
+            .join("path-query.json")
+            .exists()
+    );
 }

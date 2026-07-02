@@ -1,5 +1,5 @@
 use crate::config::AnalyzeConfig;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -116,10 +116,7 @@ pub fn configure_cmake_projects(
         }
 
         let output = command.output().with_context(|| {
-            format!(
-                "failed to spawn cmake for {}",
-                project.source_dir.display()
-            )
+            format!("failed to spawn cmake for {}", project.source_dir.display())
         })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -158,10 +155,7 @@ pub fn configure_cmake_projects(
     Ok(configured)
 }
 
-pub fn merge_compile_commands(
-    paths: &[PathBuf],
-    out_path: &Path,
-) -> Result<Vec<CompileCommand>> {
+pub fn merge_compile_commands(paths: &[PathBuf], out_path: &Path) -> Result<Vec<CompileCommand>> {
     let mut merged = BTreeMap::<(String, String, String), CompileCommand>::new();
     for path in paths {
         let text = fs::read_to_string(path)
@@ -183,8 +177,7 @@ pub fn merge_compile_commands(
 
     let result = merged.into_values().collect::<Vec<_>>();
     let json = serde_json::to_string_pretty(&result)?;
-    fs::write(out_path, json)
-        .with_context(|| format!("failed to write {}", out_path.display()))?;
+    fs::write(out_path, json).with_context(|| format!("failed to write {}", out_path.display()))?;
     Ok(result)
 }
 
@@ -194,11 +187,7 @@ fn relative_name(root: &Path, source_dir: &Path) -> String {
         .unwrap_or(source_dir)
         .to_string_lossy()
         .replace('\\', "/");
-    if rel.is_empty() {
-        ".".to_string()
-    } else {
-        rel
-    }
+    if rel.is_empty() { ".".to_string() } else { rel }
 }
 
 fn canonicalize_for_key(path: &Path) -> String {
