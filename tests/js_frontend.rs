@@ -2,7 +2,46 @@ use data_flow_analyzer::config::AnalyzeConfig;
 use data_flow_analyzer::js_source::{
     JavaScriptSyntax, discover_js_sources, extract_vue_script_units, syntax_for_unit,
 };
+use data_flow_analyzer::lang::LanguageFrontend;
+use data_flow_analyzer::lang::javascript::JavaScriptFrontend;
+use data_flow_analyzer::source::SourceUnit;
 use std::fs;
+
+fn parse_js_unit(path: &str, source: &str) -> data_flow_analyzer::ir::AnalysisCache {
+    let unit = SourceUnit {
+        absolute_path: path.into(),
+        relative_path: path.to_string(),
+        source_text: source.to_string(),
+        original_path: None,
+        line_markers: Vec::new(),
+    };
+
+    JavaScriptFrontend::new().parse_units(&[unit]).unwrap()
+}
+
+#[test]
+fn javascript_frontend_records_files_and_modules() {
+    let cache = parse_js_unit("src/main.ts", "export const value: number = 1;\n");
+
+    assert_eq!(cache.files.len(), 1);
+    assert_eq!(cache.files[0].path, "src/main.ts");
+    assert_eq!(cache.files[0].parse_status, "ok");
+    assert_eq!(cache.modules.len(), 1);
+    assert_eq!(cache.modules[0].module_name, "src/main.ts");
+}
+
+#[test]
+fn javascript_frontend_records_parse_diagnostics_for_broken_code() {
+    let cache = parse_js_unit("src/broken.ts", "export const = ;\n");
+
+    assert_eq!(cache.files[0].parse_status, "partial");
+    assert!(
+        cache
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.kind == "parse-error")
+    );
+}
 
 #[test]
 fn js_source_discovery_skips_vendor_and_cache_dirs() {

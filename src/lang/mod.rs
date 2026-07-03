@@ -1,4 +1,5 @@
 pub mod c;
+pub mod javascript;
 pub mod python;
 
 use crate::ir::AnalysisCache;
