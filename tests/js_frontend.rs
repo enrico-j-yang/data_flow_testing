@@ -4,7 +4,7 @@ use data_flow_analyzer::js_source::{
 };
 use data_flow_analyzer::lang::LanguageFrontend;
 use data_flow_analyzer::lang::javascript::JavaScriptFrontend;
-use data_flow_analyzer::source::SourceUnit;
+use data_flow_analyzer::source::{LineMarker, SourceUnit};
 use std::fs;
 
 fn parse_js_unit(path: &str, source: &str) -> data_flow_analyzer::ir::AnalysisCache {
@@ -40,6 +40,146 @@ fn javascript_frontend_records_parse_diagnostics_for_broken_code() {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.kind == "parse-error")
+    );
+}
+
+#[test]
+fn javascript_frontend_does_not_duplicate_diagnostics_inside_one_error_node() {
+    let cache = parse_js_unit("src/broken.ts", "export const = ;\n");
+
+    let parse_diagnostics = cache
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.kind == "parse-error")
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        parse_diagnostics.len(),
+        1,
+        "expected one diagnostic for one malformed declaration, got {parse_diagnostics:?}"
+    );
+}
+
+#[test]
+fn javascript_frontend_maps_diagnostics_with_latest_line_marker() {
+    let unit = SourceUnit {
+        absolute_path: "src/Widget.vue?script=setup&lang=ts".into(),
+        relative_path: "src/Widget.vue?script=setup&lang=ts".to_string(),
+        source_text: "\n\nexport const = ;\n".to_string(),
+        original_path: Some("src/Widget.vue".into()),
+        line_markers: vec![
+            LineMarker {
+                generated_line: 1,
+                original_file: "src/Widget.vue".to_string(),
+                original_line: 100,
+            },
+            LineMarker {
+                generated_line: 3,
+                original_file: "src/Widget.vue".to_string(),
+                original_line: 300,
+            },
+        ],
+    };
+
+    let cache = JavaScriptFrontend::new().parse_units(&[unit]).unwrap();
+    let diagnostic = cache
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.kind == "parse-error")
+        .expect("expected parse diagnostic");
+
+    assert_eq!(diagnostic.span.line, 300);
+    assert_eq!(diagnostic.span.end_line, 300);
+}
+
+#[test]
+fn javascript_frontend_selects_jsx_and_tsx_parsers_from_parse_units() {
+    let units = vec![
+        SourceUnit {
+            absolute_path: "src/view.tsx".into(),
+            relative_path: "src/view.tsx".to_string(),
+            source_text: "const view = <Widget />;\n".to_string(),
+            original_path: None,
+            line_markers: Vec::new(),
+        },
+        SourceUnit {
+            absolute_path: "src/view.jsx".into(),
+            relative_path: "src/view.jsx".to_string(),
+            source_text: "const view = <Widget />;\n".to_string(),
+            original_path: None,
+            line_markers: Vec::new(),
+        },
+        SourceUnit {
+            absolute_path: "src/value.ts".into(),
+            relative_path: "src/value.ts".to_string(),
+            source_text: "const value: number = 1;\n".to_string(),
+            original_path: None,
+            line_markers: Vec::new(),
+        },
+    ];
+
+    let cache = JavaScriptFrontend::new().parse_units(&units).unwrap();
+    let statuses = cache
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file.parse_status.as_str()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        statuses,
+        vec![
+            ("src/value.ts", "ok"),
+            ("src/view.jsx", "ok"),
+            ("src/view.tsx", "ok"),
+        ]
+    );
+}
+
+#[test]
+fn javascript_frontend_merges_units_in_deterministic_path_order() {
+    let units = vec![
+        SourceUnit {
+            absolute_path: "src/z.ts".into(),
+            relative_path: "src/z.ts".to_string(),
+            source_text: "export const z = 1;\n".to_string(),
+            original_path: None,
+            line_markers: Vec::new(),
+        },
+        SourceUnit {
+            absolute_path: "src/a.ts".into(),
+            relative_path: "src/a.ts".to_string(),
+            source_text: "export const = ;\n".to_string(),
+            original_path: None,
+            line_markers: Vec::new(),
+        },
+        SourceUnit {
+            absolute_path: "src/m.ts".into(),
+            relative_path: "src/m.ts".to_string(),
+            source_text: "export const m = 1;\n".to_string(),
+            original_path: None,
+            line_markers: Vec::new(),
+        },
+    ];
+
+    let cache = JavaScriptFrontend::new().parse_units(&units).unwrap();
+    let file_paths = cache
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    let module_paths = cache
+        .modules
+        .iter()
+        .map(|module| module.module_name.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(file_paths, vec!["src/a.ts", "src/m.ts", "src/z.ts"]);
+    assert_eq!(module_paths, vec!["src/a.ts", "src/m.ts", "src/z.ts"]);
+    assert!(
+        cache
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.file == "src/a.ts")
     );
 }
 

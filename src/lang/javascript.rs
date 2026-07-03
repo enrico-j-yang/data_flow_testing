@@ -120,6 +120,7 @@ fn record_parse_errors(cache: &mut AnalysisCache, unit: &SourceUnit, node: Node<
             file: unit.relative_path.clone(),
             span: span_for(unit, node),
         });
+        return;
     }
 
     let mut cursor = node.walk();
@@ -152,10 +153,13 @@ fn span_for(unit: &SourceUnit, node: Node<'_>) -> SourceSpan {
 }
 
 fn map_line(unit: &SourceUnit, generated_line: usize) -> usize {
-    if let Some(marker) = unit.line_markers.first() {
-        if generated_line >= marker.generated_line {
-            return marker.original_line + (generated_line - marker.generated_line);
-        }
+    if let Some(marker) = unit
+        .line_markers
+        .iter()
+        .filter(|marker| generated_line >= marker.generated_line)
+        .max_by_key(|marker| marker.generated_line)
+    {
+        return marker.original_line + (generated_line - marker.generated_line);
     }
 
     generated_line
