@@ -84,7 +84,7 @@ const value: number = normal
         Some(std::path::Path::new("src/Widget.vue"))
     );
     assert_eq!(units[1].line_markers[0].generated_line, 1);
-    assert_eq!(units[1].line_markers[0].original_line, 6);
+    assert_eq!(units[1].line_markers[0].original_line, 7);
     assert!(
         units[1]
             .source_text

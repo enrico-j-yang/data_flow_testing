@@ -109,7 +109,10 @@ pub fn extract_vue_script_units(
             line_markers: vec![LineMarker {
                 generated_line: 1,
                 original_file: relative_path.to_string(),
-                original_line: line_number_at(source_text, script_start),
+                original_line: line_number_at(
+                    source_text,
+                    first_content_line_start(source_text, content_start),
+                ),
             }],
         });
 
@@ -179,4 +182,16 @@ fn line_number_at(source_text: &str, byte_offset: usize) -> usize {
         .filter(|byte| *byte == b'\n')
         .count()
         + 1
+}
+
+fn first_content_line_start(source_text: &str, content_start: usize) -> usize {
+    if source_text[content_start..].starts_with("\r\n") {
+        content_start + 2
+    } else if source_text[content_start..].starts_with('\n')
+        || source_text[content_start..].starts_with('\r')
+    {
+        content_start + 1
+    } else {
+        content_start
+    }
 }
