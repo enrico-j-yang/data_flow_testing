@@ -125,6 +125,33 @@ fn build_preprocess_arguments_rewrites_compile_invocation() {
     assert_eq!(args[out_index + 1], "main.i");
 }
 
+#[cfg(windows)]
+#[test]
+fn build_preprocess_arguments_preserves_windows_command_paths() {
+    let command = CompileCommand {
+        directory: std::path::PathBuf::from("//?/C:/temp/project"),
+        file: std::path::PathBuf::from("//?/C:/temp/project/main.c"),
+        arguments: Vec::new(),
+        command: Some(
+            r#"C:\PROGRA~1\LLVM\bin\clang.exe -Iinclude -c //?/C:/temp/project/main.c -o C:\temp\project\main.obj"#
+                .to_string(),
+        ),
+        output: Some(std::path::PathBuf::from(r"C:\temp\project\main.obj")),
+    };
+
+    let args =
+        build_preprocess_arguments(&command, std::path::Path::new(r"C:\temp\project\main.i"))
+            .unwrap();
+
+    assert_eq!(args[0], r"C:\PROGRA~1\LLVM\bin\clang.exe");
+    assert!(args.iter().any(|arg| arg == "-Iinclude"));
+    assert!(args.iter().any(|arg| arg == "C:/temp/project/main.c"));
+    assert!(!args.iter().any(|arg| arg == "//?/C:/temp/project/main.c"));
+    assert!(!args.iter().any(|arg| arg == r"C:\temp\project\main.obj"));
+    let out_index = args.iter().position(|arg| arg == "-o").unwrap();
+    assert_eq!(args[out_index + 1], r"C:\temp\project\main.i");
+}
+
 #[test]
 fn parse_line_markers_maps_original_files() {
     let text = "# 1 \"/tmp/project/main.c\"\nint main(void) {\n# 12 \"/tmp/project/include/value.h\"\n  return VALUE;\n# 3 \"/tmp/project/main.c\"\n}\n";
