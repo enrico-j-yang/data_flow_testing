@@ -61,7 +61,7 @@ jobs:
       # not honor CMAKE_EXPORT_COMPILE_COMMANDS.
       - name: Set up MSVC dev shell (Windows)
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-shell@v1
+        uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
