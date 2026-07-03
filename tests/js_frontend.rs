@@ -253,6 +253,30 @@ const real = true
 }
 
 #[test]
+fn vue_extractor_ignores_non_script_tag_prefixes() {
+    let source = r#"
+<scripture>not a script</scripture>
+<script-template>also not a script</script-template>
+<script>
+const real = true
+</script>
+"#;
+
+    let units = extract_vue_script_units(
+        std::path::Path::new("src/Widget.vue"),
+        "src/Widget.vue",
+        source,
+    )
+    .unwrap();
+
+    assert_eq!(units.len(), 1);
+    assert_eq!(
+        units[0].source_text.lines().next(),
+        Some("const real = true")
+    );
+}
+
+#[test]
 fn syntax_classification_distinguishes_tsx_from_typescript() {
     let ts = data_flow_analyzer::source::SourceUnit {
         absolute_path: "src/app.ts".into(),

@@ -180,8 +180,21 @@ fn find_next_script_start(source_text: &str, mut cursor: usize) -> Option<usize>
             continue;
         }
 
-        return Some(cursor + script_offset);
+        let script_start = cursor + script_offset;
+        let boundary = script_start + "<script".len();
+        if is_script_tag_boundary(source_text[boundary..].chars().next()) {
+            return Some(script_start);
+        }
+
+        cursor = boundary;
     }
+}
+
+fn is_script_tag_boundary(next_char: Option<char>) -> bool {
+    matches!(
+        next_char,
+        None | Some('>' | '/' | ' ' | '\t' | '\r' | '\n' | '\x0C')
+    )
 }
 
 fn has_attr(attrs: &str, attr: &str) -> bool {
