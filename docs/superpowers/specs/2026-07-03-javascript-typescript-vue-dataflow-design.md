@@ -10,7 +10,7 @@ The next feature is to add JavaScript and TypeScript support, including Vue sing
 D:\repos\temp\airi
 ```
 
-The AIRI repository is a pnpm monorepo with many JavaScript, TypeScript, JSX, TSX, and Vue SFC files. A practical acceptance run needs one command that scans all supported JS-family files in that tree.
+The AIRI repository is a pnpm monorepo whose authored JS-family source is predominantly TypeScript and Vue SFC, with smaller amounts of JavaScript and MJS. Local scans with vendor/cache excludes do not show authored JSX, TSX, or CJS files, so AIRI acceptance will not exercise those parser paths. JSX, TSX, and CJS support remain in scope for grammar coverage and forward compatibility, and must be verified through synthetic fixtures.
 
 ## Confirmed Requirements
 
@@ -28,6 +28,7 @@ data-flow-analyzer analyze --lang js-ts --input D:\repos\temp\airi --out D:\tmp\
   - `.ts`
   - `.tsx`
   - `.vue`
+- AIRI acceptance verifies `.ts`, `.vue`, `.js`, and `.mjs` in practice. `.jsx`, `.tsx`, and `.cjs` are covered by tests because the current AIRI checkout does not contain authored files with those extensions under the default JS-family excludes.
 - Vue SFC support must include `<script>` and `<script setup>` blocks.
 - Vue template analysis is not part of this first version.
 - Keep report artifacts aligned with Python and C:
@@ -112,25 +113,46 @@ The preferred parser stack is:
 - `tree-sitter-javascript` for `.js`, `.jsx`, `.mjs`, `.cjs`, and non-TS Vue scripts
 - `tree-sitter-typescript` for `.ts`, `.tsx`, and `lang="ts"` Vue scripts
 
-If dependency resolution is unavailable in the local environment, the implementation may first add the frontend behind tests and then request approval to fetch crates.
+Add these dependencies to `Cargo.toml`:
+
+```toml
+tree-sitter-javascript = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+```
+
+Parser entry points:
+
+- use `tree_sitter_javascript::LANGUAGE` for `.js`, `.jsx`, `.mjs`, `.cjs`, and non-TS Vue script blocks
+- use `tree_sitter_typescript::LANGUAGE_TYPESCRIPT` for `.ts` and Vue `lang="ts"` script blocks
+- use `tree_sitter_typescript::LANGUAGE_TSX` for `.tsx`; TSX must not be parsed with `LANGUAGE_TYPESCRIPT`
+
+If these crates are not already available locally, implementation should update `Cargo.toml` first, run the dependency resolution command, and request network approval if Cargo cannot fetch them inside the sandbox.
 
 ### Source Discovery
 
-Add JS-family source discovery without changing Python discovery behavior.
+Add JS-family source discovery without changing Python discovery behavior. The JS/TS CLI branch should call a dedicated helper:
 
-Default JS-family excludes should include:
+```rust
+discover_js_sources(config: &AnalyzeConfig) -> Result<Vec<SourceUnit>>
+```
 
-- `.git`
-- `node_modules`
-- `.pnpm-store`
-- `.cache`
-- `.turbo`
-- `dist`
-- `build`
-- `coverage`
+This follows the C-style frontend path: the CLI prepares `Vec<SourceUnit>` and then calls `JavaScriptFrontend::parse_units(&units)`. Do not add a Python-style `parse_files(&[SourceFile])` wrapper for JS/TS because Vue extraction already produces virtual source units.
+
+`AnalyzeConfig::default()` currently has Python-oriented excludes and does not switch defaults by language. To keep existing Python behavior stable, the `analyze_js_ts` branch must inject JS-family excludes by taking `config.exclude` and adding these defaults for JS-family discovery:
+
+- `**/.git/**`
+- `**/node_modules/**`
+- `**/.pnpm-store/**`
+- `**/.cache/**`
+- `**/.turbo/**`
+- `**/dist/**`
+- `**/build/**`
+- `**/coverage/**`
 - generated package manager caches
 
-This keeps AIRI scanning focused on authored source files and avoids analyzing vendored packages or generated assets.
+`**/node_modules/**` covers pnpm's nested `node_modules/.pnpm` store. This keeps AIRI scanning focused on authored source files and avoids analyzing vendored packages or generated assets.
+
+The helper should read raw JS/TS/JSX/TSX files directly into `SourceUnit`s and should expand Vue SFC files into one `SourceUnit` per supported script block.
 
 ### Vue SFC Handling
 
@@ -150,7 +172,39 @@ components/Foo.vue?script=normal&lang=ts
 components/Foo.vue?script=setup&lang=ts
 ```
 
-Line numbers should map back to the original `.vue` file by preserving a line offset. Existing `SourceSpan` can continue to store a single file and line; the frontend should report spans against the `.vue` path with original line numbers whenever practical.
+The virtual path string is a stable ID contract because the analyzer's stable IDs include `relative_path`. Do not change the `?script=<normal|setup>&lang=<js|ts>` shape without a schema/version migration.
+
+First-version Vue cross-block behavior is intentionally conservative. Normal `<script>` and `<script setup>` blocks from the same `.vue` file are separate `SourceUnit`s and separate modules. References across those blocks may appear unresolved or external in v1; the report should document this as a conservative limitation rather than merging the blocks incorrectly.
+
+### Span And Path Mapping
+
+For raw JS/TS files, `SourceSpan.file` should be the repository-relative path.
+
+For Vue script blocks:
+
+- `SourceUnit.relative_path` should be the stable virtual path, such as `components/Foo.vue?script=setup&lang=ts`
+- `SourceUnit.original_path` should point to the original `.vue` file
+- `SourceUnit.line_markers` should preserve the script-block start line in the `.vue` file
+- `SourceSpan.file` should use the virtual `relative_path`
+- `SourceSpan.line` and `end_line` should use original `.vue` line numbers when the block line offset is known
+
+This gives stable IDs through the virtual path while keeping report line numbers useful for opening the original Vue file.
+
+### Qualified Names
+
+`paths` accepts a function ID or `FunctionRecord.qualified_name`, so JS/TS qualified names must be deterministic.
+
+Use these formats:
+
+- top-level named function: `<virtual-relative-path>::<name>`
+- exported named function: `<virtual-relative-path>::<name>`
+- default export without a name: `<virtual-relative-path>::default`
+- class method: `<virtual-relative-path>::<ClassName>.<methodName>`
+- object-literal method assigned to a binding: `<virtual-relative-path>::<binding>.<methodName>`
+- arrow/function expression assigned to a local: `<virtual-relative-path>::<binding>`
+- anonymous function without an obvious binding: `<virtual-relative-path>::<anonymous@line:col>`
+
+Line and column fallback names must use the mapped `SourceSpan` location so anonymous IDs remain stable as long as source locations are stable.
 
 ### IR Lowering Scope
 
@@ -179,17 +233,52 @@ The first version should lower enough JavaScript-family constructs to be useful 
 
 Unsupported or ambiguous constructs should produce conservative diagnostics or `Place::Unknown` rather than failing the whole analysis.
 
+### Import Records
+
+The existing `resolve_imports` pass is Python-specific and depends on `__init__.py`, `__all__`, dotted Python modules, and Python relative import levels. The JS/TS CLI branch must not call `resolve_imports`, and v1 should not add a `resolve_js_imports` pass.
+
+The JS/TS frontend should still emit `ImportRecord`s for report visibility:
+
+- `module`: raw module specifier string, for example `"vue"`, `"./foo"`, or `"@/stores/app"`
+- `name`: imported export name
+  - default import: `Some("default")`
+  - named import: `Some("<imported-name>")`
+  - namespace import: `Some("*")`
+  - side-effect import: `None`
+- `alias`: local binding name when one exists
+  - `import value from "./x"` -> `name = Some("default")`, `alias = Some("value")`
+  - `import { source as local } from "./x"` -> `name = Some("source")`, `alias = Some("local")`
+  - `import * as ns from "./x"` -> `name = Some("*")`, `alias = Some("ns")`
+  - `import "./setup"` -> `name = None`, `alias = None`
+- `level`: always `0` for JS/TS because the Python relative-import level model does not apply
+- `resolution`: `"external"` for all JS/TS imports in v1
+
+Any local binding created by an import should also produce a `Definition` with `def_kind = "import"` and conservative `Place::External` dependencies.
+
+### Vue Script Setup Macros
+
+Vue compiler macros are common in AIRI and should not be treated as ordinary unresolved runtime calls.
+
+Handle these forms in v1:
+
+- `const props = defineProps(...)` and `const props = withDefaults(defineProps(...), ...)` define local `props`
+- `const { foo } = defineProps(...)` and `const { foo } = withDefaults(defineProps(...), ...)` define destructured local bindings such as `foo`
+- `const emit = defineEmits(...)` defines local `emit`
+- `const model = defineModel(...)` defines local `model`
+- `defineExpose({...})` should collect ordinary uses from the object expression but should not create a runtime unresolved-call diagnostic for `defineExpose`
+
+Call records for these macros may use `resolution = "compiler-macro"` or may be omitted if no downstream summary value is useful. Unsupported macro forms should produce conservative diagnostics rather than false definitions.
+
 ### CFG
 
-The JS/TS frontend should emit baseline CFG records compatible with existing path queries:
+The JS/TS frontend should initially match the Python baseline CFG style rather than trying to model a complete JavaScript CFG. For every `FunctionRecord`, including arrow functions, methods, and Vue script-related functions, emit:
 
 - one entry block and one exit block per function
-- sequence edges for ordinary statements
-- branch edges for `if`, conditional expressions, and `switch`
-- loop-enter and loop-back edges for loops
-- exception edges for `try` / `catch` when feasible
+- one body/basic block when the function has a body
+- an entry-to-body sequence edge
+- a body-to-exit edge
 
-This does not need to be a perfect JavaScript CFG in the first version. It needs to provide stable function-level structure for the existing `paths` command and report views.
+Branches, loops, switches, and try/catch statements should still be walked for definitions and uses, but rich branch/loop/exception CFG edges are a later enhancement. This keeps `paths` working for all functions without over-promising control-flow precision in v1.
 
 ### Definitions and Uses
 
@@ -237,6 +326,7 @@ Parsing and lowering should be best effort:
 - parser errors should be recorded in `data/parse_diagnostics.csv`
 - files with partial parse trees should still contribute any recoverable IR
 - Vue blocks with malformed tags should produce diagnostics and continue scanning other files
+- when `fail_on_parse_error = true`, JS/TS analysis should stop on the first parse error after recording enough context in the error message
 
 ### Performance
 
@@ -253,7 +343,7 @@ Use TDD for implementation.
 
 ### Unit and Frontend Tests
 
-Add tests for:
+Add `tests/js_frontend.rs` for:
 
 - JS/TS source discovery and default excludes
 - Vue SFC script extraction with normal and setup scripts
@@ -263,17 +353,25 @@ Add tests for:
 - member/subscript normalization
 - destructuring definitions
 - call records and return-target wiring
-- baseline CFG for branches and loops
+- baseline CFG for function-like constructs
 - parse diagnostics for malformed JS/TS/Vue input
 
 ### Integration Tests
 
-Add CLI integration tests that write a temporary JS/TS/Vue fixture and assert:
+Add `tests/js_integration_report.rs` for CLI integration tests that write a temporary JS/TS/Vue fixture and assert:
 
 - `analyze --lang js-ts` succeeds
 - shared report artifacts exist
 - `data/analysis-cache.json` contains JS/TS functions
 - `paths` can query a function from that cache
+
+Add `tests/js_cli.rs` for CLI help and language alias coverage:
+
+- `--lang js-ts`
+- `--lang javascript`
+- `--lang js`
+- `--lang typescript`
+- `--lang ts`
 
 ### AIRI Acceptance
 
@@ -291,6 +389,16 @@ The test should:
 4. assert the cache contains at least one file, function, definition, use, and graph output
 5. run `paths` against a discovered function where feasible
 
+This acceptance test must not claim to validate JSX, TSX, or CJS behavior because the current AIRI checkout does not contain authored files with those extensions under the JS-family excludes.
+
+### Documentation
+
+Update `README.md`:
+
+- add JavaScript/TypeScript/Vue to Current Scope
+- add an "Analyze A JS/TS Codebase" section with the AIRI-style `--lang js-ts` command
+- document that Vue `<script>` and `<script setup>` blocks are analyzed while templates are not analyzed in v1
+
 ## Acceptance Criteria
 
 The feature is complete when:
@@ -301,12 +409,13 @@ The feature is complete when:
 - JS/TS/JSX/TSX/Vue source discovery works with sensible default excludes
 - Vue `<script>` and `<script setup>` blocks are analyzed
 - the frontend emits shared IR records for files, modules, functions, scopes, definitions, uses, calls, and CFGs
+- every JS/TS function-like record has a baseline CFG compatible with `paths`
 - shared def-use and variable-dependency analysis runs on JS/TS output
 - reports for JS/TS contain the same canonical artifacts as Python and C
 - `paths` works against JS/TS-generated `analysis-cache.json`
 - the AIRI acceptance command completes on `D:\repos\temp\airi`
+- JSX, TSX, and CJS parser paths are covered by synthetic tests rather than AIRI acceptance
 
 ## Design Rationale
 
 This approach keeps the analyzer architecture stable. JavaScript, TypeScript, and Vue-specific complexity remains in the language boundary, while reports, data exports, path queries, and downstream consumers continue to rely on the existing shared IR schema. It also avoids requiring users to configure TypeScript projects, install dependencies, or run build tools before analysis.
-
