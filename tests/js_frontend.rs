@@ -196,6 +196,59 @@ const value: number = 1
 }
 
 #[test]
+fn vue_extractor_ignores_gt_inside_quoted_script_attributes() {
+    let source = r#"<script setup lang="ts" generic="T extends Foo<Bar>">
+const real: T = value
+</script>
+"#;
+
+    let units = extract_vue_script_units(
+        std::path::Path::new("src/Widget.vue"),
+        "src/Widget.vue",
+        source,
+    )
+    .unwrap();
+
+    assert_eq!(units.len(), 1);
+    assert_eq!(
+        units[0].relative_path,
+        "src/Widget.vue?script=setup&lang=ts"
+    );
+    assert_eq!(units[0].line_markers[0].generated_line, 1);
+    assert_eq!(units[0].line_markers[0].original_line, 2);
+    assert_eq!(
+        units[0].source_text.lines().next(),
+        Some("const real: T = value")
+    );
+}
+
+#[test]
+fn vue_extractor_matches_script_tags_case_insensitively() {
+    let source = r#"<SCRIPT lang="ts">
+const value: number = 1
+</SCRIPT>
+"#;
+
+    let units = extract_vue_script_units(
+        std::path::Path::new("src/Widget.vue"),
+        "src/Widget.vue",
+        source,
+    )
+    .unwrap();
+
+    assert_eq!(units.len(), 1);
+    assert_eq!(
+        units[0].relative_path,
+        "src/Widget.vue?script=normal&lang=ts"
+    );
+    assert_eq!(syntax_for_unit(&units[0]), JavaScriptSyntax::TypeScript);
+    assert_eq!(
+        units[0].source_text.lines().next(),
+        Some("const value: number = 1")
+    );
+}
+
+#[test]
 fn vue_extractor_preserves_tsx_and_jsx_lang_attributes() {
     let source = r#"<script setup lang = "TSX">
 const view = <Widget />

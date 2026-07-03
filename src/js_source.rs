@@ -89,14 +89,15 @@ pub fn extract_vue_script_units(
     let mut cursor = 0;
 
     while let Some(script_start) = find_next_script_start(source_text, cursor) {
-        let Some(open_end_offset) = source_text[script_start..].find('>') else {
+        let Some(open_end) = find_opening_tag_end(source_text, script_start) else {
             break;
         };
-        let open_end = script_start + open_end_offset;
         let attrs = &source_text[script_start + "<script".len()..open_end];
         let raw_content_start = open_end + 1;
         let content_start = first_content_line_start(source_text, raw_content_start);
-        let Some(close_offset) = source_text[content_start..].find("</script>") else {
+        let Some(close_offset) =
+            find_ascii_case_insensitive(&source_text[content_start..], "</script>")
+        else {
             break;
         };
         let content_end = content_start + close_offset;
@@ -165,7 +166,7 @@ fn is_js_family_path(path: &Path) -> bool {
 fn find_next_script_start(source_text: &str, mut cursor: usize) -> Option<usize> {
     loop {
         let rest = &source_text[cursor..];
-        let script_offset = rest.find("<script")?;
+        let script_offset = find_ascii_case_insensitive(rest, "<script")?;
         let comment_offset = rest.find("<!--");
 
         if let Some(comment_offset) = comment_offset
@@ -188,6 +189,31 @@ fn find_next_script_start(source_text: &str, mut cursor: usize) -> Option<usize>
 
         cursor = boundary;
     }
+}
+
+fn find_opening_tag_end(source_text: &str, tag_start: usize) -> Option<usize> {
+    let bytes = source_text.as_bytes();
+    let mut cursor = tag_start;
+    let mut quote = None;
+
+    while cursor < bytes.len() {
+        match (bytes[cursor], quote) {
+            (b'\'' | b'"', None) => quote = Some(bytes[cursor]),
+            (byte, Some(active_quote)) if byte == active_quote => quote = None,
+            (b'>', None) => return Some(cursor),
+            _ => {}
+        }
+        cursor += 1;
+    }
+
+    None
+}
+
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 fn is_script_tag_boundary(next_char: Option<char>) -> bool {
