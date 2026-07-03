@@ -7,7 +7,7 @@ use crate::ir::{
     AnalysisCache, CaptureRecord, ClassRecord, Definition, Diagnostic, FunctionRecord,
     ImportRecord, ModuleRecord, Place, SCHEMA_VERSION, ScopeRecord, SourceFileRecord, Use,
 };
-use crate::source::SourceSpan;
+use crate::source::{SourceSpan, SourceUnit};
 use anyhow::{Context, Result, anyhow};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -123,6 +123,7 @@ impl PythonFrontend {
             .to_string()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push_import(
         &self,
         cache: &mut AnalysisCache,
@@ -445,12 +446,12 @@ impl PythonFrontend {
             span: self.span(ctx.file, ctx.source, node),
         });
 
-        if ctx.function_stack.is_empty() {
-            if let Some(class_frame) = ctx.class_stack.last() {
-                cache.classes[class_frame.cache_index]
-                    .methods
-                    .push(function_id.clone());
-            }
+        if ctx.function_stack.is_empty()
+            && let Some(class_frame) = ctx.class_stack.last()
+        {
+            cache.classes[class_frame.cache_index]
+                .methods
+                .push(function_id.clone());
         }
 
         ctx.function_stack.push(FunctionFrame {
@@ -827,10 +828,10 @@ impl PythonFrontend {
                     name: name.to_string(),
                 };
             }
-            if current_frame.nonlocal_decls.contains(name) {
-                if let Some(place) = self.resolve_enclosing_function_place(ctx, name) {
-                    return place;
-                }
+            if current_frame.nonlocal_decls.contains(name)
+                && let Some(place) = self.resolve_enclosing_function_place(ctx, name)
+            {
+                return place;
             }
 
             for (index, frame) in ctx.function_stack.iter().enumerate().rev() {
@@ -911,10 +912,10 @@ impl PythonFrontend {
                     name: name.to_string(),
                 };
             }
-            if function_frame.nonlocal_decls.contains(name) {
-                if let Some(place) = self.resolve_enclosing_function_place(ctx, name) {
-                    return place;
-                }
+            if function_frame.nonlocal_decls.contains(name)
+                && let Some(place) = self.resolve_enclosing_function_place(ctx, name)
+            {
+                return place;
             }
 
             return Place::Local {
@@ -1064,16 +1065,16 @@ impl PythonFrontend {
 }
 
 impl LanguageFrontend for PythonFrontend {
-    fn parse_files(&self, files: &[SourceFile]) -> Result<AnalysisCache> {
-        let mut partials = files
+    fn parse_units(&self, units: &[SourceUnit]) -> Result<AnalysisCache> {
+        let mut partials = units
             .par_iter()
-            .map(|file| -> Result<(String, AnalysisCache)> {
-                let cache = self.parse_single_file(file)?;
+            .map(|unit| -> Result<(String, AnalysisCache)> {
+                let cache = self.parse_single_unit(unit)?;
                 let key = cache
                     .files
                     .first()
                     .map(|record| record.path.clone())
-                    .unwrap_or_else(|| file.relative_path.clone());
+                    .unwrap_or_else(|| unit.relative_path.clone());
                 Ok((key, cache))
             })
             .collect::<Vec<_>>()
@@ -1095,15 +1096,41 @@ impl LanguageFrontend for PythonFrontend {
 }
 
 impl PythonFrontend {
-    fn parse_single_file(&self, file: &SourceFile) -> Result<AnalysisCache> {
+    /// Convenience wrapper that reads each file from disk and forwards to
+    /// `parse_units`. Tests and the analyze CLI still use this entry point.
+    pub fn parse_files(&self, files: &[SourceFile]) -> Result<AnalysisCache> {
+        let units = files
+            .iter()
+            .map(|file| -> Result<SourceUnit> {
+                let source_text = fs::read_to_string(&file.absolute_path)
+                    .with_context(|| format!("failed to read {}", file.absolute_path.display()))?;
+                Ok(SourceUnit {
+                    absolute_path: file.absolute_path.clone(),
+                    relative_path: file.relative_path.clone(),
+                    source_text,
+                    original_path: None,
+                    line_markers: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.parse_units(&units)
+    }
+
+    fn parse_single_unit(&self, unit: &SourceUnit) -> Result<AnalysisCache> {
+        let file = SourceFile {
+            absolute_path: unit.absolute_path.clone(),
+            relative_path: unit.relative_path.clone(),
+        };
+        self.parse_single_file(&file, &unit.source_text)
+    }
+
+    fn parse_single_file(&self, file: &SourceFile, source: &str) -> Result<AnalysisCache> {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_python::LANGUAGE.into())
             .context("failed to load tree-sitter-python")?;
 
-        let source = fs::read_to_string(&file.absolute_path)
-            .with_context(|| format!("failed to read {}", file.absolute_path.display()))?;
-        let tree = parser.parse(&source, None).ok_or_else(|| {
+        let tree = parser.parse(source, None).ok_or_else(|| {
             anyhow!(
                 "tree-sitter returned no parse tree for {}",
                 file.relative_path
@@ -1114,8 +1141,8 @@ impl PythonFrontend {
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             ..AnalysisCache::default()
         };
-        self.record_parse_errors(&mut cache, file, &source, tree.root_node());
-        self.lower_module(&mut cache, file, &source, tree.root_node());
+        self.record_parse_errors(&mut cache, file, source, tree.root_node());
+        self.lower_module(&mut cache, file, source, tree.root_node());
         Ok(cache)
     }
 }
@@ -1541,38 +1568,38 @@ fn collect_expression_uses<'tree>(node: Node<'tree>, nodes: &mut Vec<ExpressionU
                 .child_by_field_name("arguments")
                 .map(|arguments| arguments.named_child_count() > 0)
                 .unwrap_or(false);
-            if let Some(function) = function {
-                if matches!(function.kind(), "attribute" | "subscript") {
-                    let receiver = if function.kind() == "attribute" {
-                        function.child_by_field_name("object")
-                    } else {
-                        function.child_by_field_name("value")
-                    };
+            if let Some(function) = function
+                && matches!(function.kind(), "attribute" | "subscript")
+            {
+                let receiver = if function.kind() == "attribute" {
+                    function.child_by_field_name("object")
+                } else {
+                    function.child_by_field_name("value")
+                };
 
-                    if has_arguments {
-                        if let Some(receiver) = receiver {
-                            collect_expression_uses(receiver, nodes);
-                        }
-                        if let Some(arguments) = node.child_by_field_name("arguments") {
-                            let mut cursor = arguments.walk();
-                            for child in arguments.named_children(&mut cursor) {
-                                collect_expression_uses(child, nodes);
-                            }
-                        }
-                        return;
-                    }
-
+                if has_arguments {
                     if let Some(receiver) = receiver {
-                        if receiver.kind() == "identifier" {
-                            nodes.push(ExpressionUseSpec {
-                                node: function,
-                                use_kind: "call-zero-arg",
-                            });
-                        } else {
-                            collect_expression_uses(receiver, nodes);
-                        }
-                        return;
+                        collect_expression_uses(receiver, nodes);
                     }
+                    if let Some(arguments) = node.child_by_field_name("arguments") {
+                        let mut cursor = arguments.walk();
+                        for child in arguments.named_children(&mut cursor) {
+                            collect_expression_uses(child, nodes);
+                        }
+                    }
+                    return;
+                }
+
+                if let Some(receiver) = receiver {
+                    if receiver.kind() == "identifier" {
+                        nodes.push(ExpressionUseSpec {
+                            node: function,
+                            use_kind: "call-zero-arg",
+                        });
+                    } else {
+                        collect_expression_uses(receiver, nodes);
+                    }
+                    return;
                 }
             }
             let mut cursor = node.walk();

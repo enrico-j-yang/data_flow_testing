@@ -111,7 +111,7 @@ fn build_import_dependency_map(
 
         for import in &module.imports {
             let key = import_record_key(owner, import);
-            let resolved = resolve_target_module(owner, import, module_index);
+            let resolved = resolve_target_module(owner, import);
             let places = match import.name.as_deref() {
                 Some("*") => Vec::new(),
                 Some(name) => {
@@ -140,7 +140,7 @@ fn classify_import_resolution(
     import: &ImportRecord,
     module_index: &BTreeMap<String, ModuleContext>,
 ) -> Option<String> {
-    let resolved = resolve_target_module(owner, import, module_index)?;
+    let resolved = resolve_target_module(owner, import)?;
 
     if module_index.contains_key(&resolved) {
         if import.level > 0 {
@@ -153,11 +153,7 @@ fn classify_import_resolution(
     }
 }
 
-fn resolve_target_module(
-    owner: &ModuleContext,
-    import: &ImportRecord,
-    module_index: &BTreeMap<String, ModuleContext>,
-) -> Option<String> {
+fn resolve_target_module(owner: &ModuleContext, import: &ImportRecord) -> Option<String> {
     if import.level == 0 {
         return Some(import.module.clone());
     }
@@ -183,11 +179,7 @@ fn resolve_target_module(
     }
 
     let candidate = segments.join(".");
-    if module_index.contains_key(&candidate) {
-        Some(candidate)
-    } else {
-        Some(candidate)
-    }
+    Some(candidate)
 }
 
 fn parse_all_expr(expr: &str) -> Option<BTreeSet<String>> {
@@ -215,9 +207,7 @@ fn parse_all_expr(expr: &str) -> Option<BTreeSet<String>> {
         let single_quoted = item
             .strip_prefix('\'')
             .and_then(|value| value.strip_suffix('\''));
-        let Some(name) = quoted.or(single_quoted) else {
-            return None;
-        };
+        let name = quoted.or(single_quoted)?;
         if !name.is_empty() {
             names.insert(name.to_string());
         }
@@ -288,15 +278,14 @@ fn import_target_label(import: &ImportRecord, include_name: bool) -> String {
         target.push_str(&".".repeat(import.level));
     }
     target.push_str(&import.module);
-    if include_name {
-        if let Some(name) = &import.name {
-            if !name.is_empty() {
-                if !target.is_empty() {
-                    target.push(':');
-                }
-                target.push_str(name);
-            }
+    if include_name
+        && let Some(name) = &import.name
+        && !name.is_empty()
+    {
+        if !target.is_empty() {
+            target.push(':');
         }
+        target.push_str(name);
     }
     target
 }

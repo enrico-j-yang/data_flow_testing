@@ -33,6 +33,17 @@ fn bare_invocation_prints_help_with_actual_binary_name() {
 }
 
 #[test]
+fn analyze_help_mentions_c_build_flags() {
+    let mut cmd = Command::cargo_bin("data-flow-analyzer").unwrap();
+    cmd.args(["analyze", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("--build-root"))
+        .stdout(contains("--cmake-arg"))
+        .stdout(contains("--keep-preprocessed"));
+}
+
+#[test]
 fn analyze_command_writes_report_for_python_fixture() {
     let dir = tempdir().unwrap();
     let input = dir.path().join("app");
