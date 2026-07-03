@@ -8,6 +8,10 @@ pub struct AnalyzeConfig {
     pub lang: String,
     pub input: PathBuf,
     pub out: PathBuf,
+    pub build_root: Option<PathBuf>,
+    pub cmake_args: Vec<String>,
+    pub keep_preprocessed: bool,
+    pub c_project_globs: Vec<String>,
     pub max_loop_unroll: usize,
     pub max_paths: usize,
     pub max_path_len: usize,
@@ -25,6 +29,10 @@ struct RawAnalyzeConfig {
     lang: Option<String>,
     input: Option<PathBuf>,
     out: Option<PathBuf>,
+    build_root: Option<PathBuf>,
+    cmake_args: Option<Vec<String>>,
+    keep_preprocessed: Option<bool>,
+    c_project_globs: Option<Vec<String>>,
     max_loop_unroll: Option<usize>,
     max_paths: Option<usize>,
     max_path_len: Option<usize>,
@@ -43,6 +51,10 @@ impl Default for AnalyzeConfig {
             lang: "python".to_string(),
             input: PathBuf::from("."),
             out: PathBuf::from("report"),
+            build_root: None,
+            cmake_args: Vec::new(),
+            keep_preprocessed: false,
+            c_project_globs: vec!["**/CMakeLists.txt".to_string()],
             max_loop_unroll: 2,
             max_paths: 1000,
             max_path_len: 500,
@@ -80,6 +92,9 @@ impl AnalyzeConfig {
         lang: Option<String>,
         input: Option<PathBuf>,
         out: Option<PathBuf>,
+        build_root: Option<PathBuf>,
+        cmake_args: Vec<String>,
+        keep_preprocessed: bool,
     ) {
         if let Some(lang) = lang {
             self.lang = lang;
@@ -89,6 +104,15 @@ impl AnalyzeConfig {
         }
         if let Some(out) = out {
             self.out = out;
+        }
+        if let Some(build_root) = build_root {
+            self.build_root = Some(build_root);
+        }
+        if !cmake_args.is_empty() {
+            self.cmake_args = cmake_args;
+        }
+        if keep_preprocessed {
+            self.keep_preprocessed = true;
         }
     }
 
@@ -108,6 +132,12 @@ impl RawAnalyzeConfig {
             lang: self.lang.unwrap_or(defaults.lang),
             input: resolve_config_path(base_dir, self.input.unwrap_or(defaults.input)),
             out: resolve_config_path(base_dir, self.out.unwrap_or(defaults.out)),
+            build_root: self
+                .build_root
+                .map(|path| resolve_config_path(base_dir, path)),
+            cmake_args: self.cmake_args.unwrap_or_default(),
+            keep_preprocessed: self.keep_preprocessed.unwrap_or(defaults.keep_preprocessed),
+            c_project_globs: self.c_project_globs.unwrap_or(defaults.c_project_globs),
             max_loop_unroll: self.max_loop_unroll.unwrap_or(defaults.max_loop_unroll),
             max_paths: self.max_paths.unwrap_or(defaults.max_paths),
             max_path_len: self.max_path_len.unwrap_or(defaults.max_path_len),

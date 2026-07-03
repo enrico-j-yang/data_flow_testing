@@ -13,11 +13,36 @@ pub fn write_report(cache: &AnalysisCache, out: &Path, top_n: usize) -> Result<(
     fs::create_dir_all(out.join("functions"))?;
     fs::create_dir_all(out.join("data"))?;
 
+    let t0 = std::time::Instant::now();
     write_cache(cache, &out.join("data/analysis-cache.json"))?;
+    eprintln!(
+        "  report: cache.json    {:>6.1}s",
+        t0.elapsed().as_secs_f32()
+    );
+    let t = std::time::Instant::now();
     write_csvs(cache, &out.join("data"))?;
+    eprintln!(
+        "  report: csvs          {:>6.1}s",
+        t.elapsed().as_secs_f32()
+    );
+    let t = std::time::Instant::now();
     let graphs = write_graphs(cache, &out.join("graphs"), top_n)?;
+    eprintln!(
+        "  report: graphs        {:>6.1}s",
+        t.elapsed().as_secs_f32()
+    );
+    let t = std::time::Instant::now();
     write_index(cache, out, &graphs)?;
+    eprintln!(
+        "  report: index.html    {:>6.1}s",
+        t.elapsed().as_secs_f32()
+    );
+    let t = std::time::Instant::now();
     write_stylesheet(out)?;
+    eprintln!(
+        "  report: stylesheet    {:>6.1}s",
+        t.elapsed().as_secs_f32()
+    );
     Ok(())
 }
 
@@ -293,6 +318,7 @@ fn write_graphs(
         let dot_path = graph_dir.join(format!("{}.dot", spec.stem));
         let svg_path = graph_dir.join(format!("{}.svg", spec.stem));
         let json_path = graph_dir.join(format!("{}.graph.json", spec.stem));
+        let t = std::time::Instant::now();
         match spec.writer {
             GraphWriter::DefUseHotspots => {
                 graph::write_def_use_hotspots_dot(cache, &dot_path, spec.top_n.unwrap_or(top_n))?
@@ -302,7 +328,19 @@ fn write_graphs(
                 graph::write_var_dependency_graph_json(cache, &json_path)?
             }
         }
+        eprintln!(
+            "    graph[{}] dot      {:>6.1}s",
+            spec.stem,
+            t.elapsed().as_secs_f32()
+        );
+        let t = std::time::Instant::now();
         let svg_written = graph::render_svg(&dot_path, &svg_path)?;
+        eprintln!(
+            "    graph[{}] svg      {:>6.1}s (rendered={})",
+            spec.stem,
+            t.elapsed().as_secs_f32(),
+            svg_written
+        );
         generated.push(GeneratedGraph {
             name: spec.name.to_string(),
             dot_rel: format!("graphs/{}.dot", spec.stem),
