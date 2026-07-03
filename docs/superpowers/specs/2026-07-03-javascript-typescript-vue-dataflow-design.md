@@ -56,6 +56,7 @@ data-flow-analyzer analyze --lang js-ts --input D:\repos\temp\airi --out D:\tmp\
 - Complete inter-module bundler resolution for every alias convention in AIRI.
 - Complete points-to, alias, prototype-chain, or decorator semantics.
 - Executing project code or installing dependencies as part of analysis.
+- Complete cross-component Vue prop, event, slot, or template-ref propagation.
 
 ## User Workflow
 
@@ -255,6 +256,74 @@ The JS/TS frontend should still emit `ImportRecord`s for report visibility:
 
 Any local binding created by an import should also produce a `Definition` with `def_kind = "import"` and conservative `Place::External` dependencies.
 
+### Cross-Language Binding Strategy
+
+Treat JavaScript, TypeScript, and Vue SFC scripts as one JS-family runtime with conservative bridges between language surfaces. Do not link variables by simple same-name matching across files or blocks.
+
+Required v1 bridges:
+
+- JS/TS runtime syntax lowers to the same shared IR regardless of whether the parser is JavaScript, TypeScript, or TSX.
+- Type-only constructs do not produce runtime dataflow:
+  - `import type`
+  - `export type`
+  - `interface`
+  - `type`
+  - type annotations
+  - generic type parameters
+- Vue `<script>` and `<script setup>` blocks from the same file record a common component identity through their shared original `.vue` path.
+- Vue compiler macro bindings are explicit local definitions, as described in the next section.
+
+Optional v1 import/export bridge:
+
+- Resolve only safe relative module specifiers such as `./x`, `../x`, and `./x.vue`.
+- Probe JS-family extensions in a deterministic order:
+  - `.ts`
+  - `.tsx`
+  - `.js`
+  - `.jsx`
+  - `.mjs`
+  - `.cjs`
+  - `.vue`
+  - `index.ts`
+  - `index.tsx`
+  - `index.js`
+  - `index.jsx`
+  - `index.mjs`
+  - `index.cjs`
+- For resolved runtime imports, update the import binding definition with a dependency on `Place::Global { module_id, name }` from the target module.
+- For unresolved imports, keep the dependency as `Place::External { name: "<specifier>:<name>" }`.
+- Path aliases such as `@/`, `~`, virtual modules, package imports, and framework auto-imports remain external in v1 unless a later task adds config parsing for them.
+
+Vue same-file bridge:
+
+- `<script>` module-scope bindings may be visible to `<script setup>` in a conservative read-only way.
+- `<script setup>` bindings are not made visible back to normal `<script>`.
+- If the bridge cannot determine direction or ownership, emit a diagnostic and do not create a dataflow edge.
+
+Optional v1 template bridge:
+
+- Full Vue template dataflow remains a non-goal, but a lightweight usage bridge may be added without blocking the main feature.
+- Create a synthetic template scope named `<vue-path>::template`.
+- Extract only simple expression references from:
+  - interpolation: `{{ foo }}`
+  - bindings: `:prop="foo"` and `v-bind:prop="foo"`
+  - conditions: `v-if="foo"` and `v-else-if="foo"`
+  - events: `@click="foo()"` and `v-on:click="foo()"`
+  - models: `v-model="foo"`
+  - loops: `v-for="item in items"`
+- Link template reads only to top-level `<script setup>` bindings, props, and model bindings that are already represented in IR.
+- `v-model` should produce a read plus a synthetic write when the target is a known binding.
+- `v-for` should treat the source collection as a use and the loop variable as a template-local definition.
+- Slot scopes, cross-component prop propagation, event propagation, refs, directives with complex scopes, and full Vue compiler semantics are out of scope for v1.
+
+Bridge edge labeling:
+
+- Import bridge edges should use a distinct dependency kind such as `js-import`.
+- Same-SFC bridge edges should use `vue-script-setup`.
+- Template bridge uses should use `use_kind = "vue-template-read"` and `context = "template"`.
+- Template writes should use `def_kind = "vue-template-write"`.
+- Vue macro definitions should use `def_kind` values such as `vue-prop`, `vue-emit`, `vue-model`, or `vue-macro`.
+
 ### Vue Script Setup Macros
 
 Vue compiler macros are common in AIRI and should not be treated as ordinary unresolved runtime calls.
@@ -408,6 +477,7 @@ The feature is complete when:
 - `--lang js-ts` is accepted by the CLI
 - JS/TS/JSX/TSX/Vue source discovery works with sensible default excludes
 - Vue `<script>` and `<script setup>` blocks are analyzed
+- Vue compiler macros create conservative local definitions for props, emits, models, and exposes
 - the frontend emits shared IR records for files, modules, functions, scopes, definitions, uses, calls, and CFGs
 - every JS/TS function-like record has a baseline CFG compatible with `paths`
 - shared def-use and variable-dependency analysis runs on JS/TS output
