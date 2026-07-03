@@ -8,8 +8,11 @@ use std::fs;
 fn js_source_discovery_skips_vendor_and_cache_dirs() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::create_dir_all(dir.path().join("src/generated/deep")).unwrap();
+    fs::create_dir_all(dir.path().join("src/node_modules/nested")).unwrap();
     fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
     fs::create_dir_all(dir.path().join(".turbo/cache")).unwrap();
+    fs::create_dir_all(dir.path().join("dist/assets")).unwrap();
     fs::write(dir.path().join("src/app.ts"), "export const value = 1;\n").unwrap();
     fs::write(
         dir.path().join("src/view.vue"),
@@ -22,8 +25,23 @@ fn js_source_discovery_skips_vendor_and_cache_dirs() {
     )
     .unwrap();
     fs::write(
+        dir.path().join("src/node_modules/nested/index.ts"),
+        "export const nestedVendored = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("src/generated/deep/client.ts"),
+        "export const generated = 1;\n",
+    )
+    .unwrap();
+    fs::write(
         dir.path().join(".turbo/cache/generated.ts"),
         "export const cached = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("dist/assets/bundle.js"),
+        "export const bundled = 1;\n",
     )
     .unwrap();
 
@@ -31,6 +49,7 @@ fn js_source_discovery_skips_vendor_and_cache_dirs() {
         lang: "js-ts".to_string(),
         input: dir.path().to_path_buf(),
         out: dir.path().join("out"),
+        exclude: vec!["src/generated/**".to_string()],
         ..AnalyzeConfig::default()
     };
 
@@ -49,6 +68,8 @@ fn js_source_discovery_skips_vendor_and_cache_dirs() {
     );
     assert!(!paths.iter().any(|path| path.contains("node_modules")));
     assert!(!paths.iter().any(|path| path.contains(".turbo")));
+    assert!(!paths.iter().any(|path| path.contains("generated")));
+    assert!(!paths.iter().any(|path| path.contains("dist")));
 }
 
 #[test]
@@ -133,6 +154,26 @@ fn vue_extractor_trims_crlf_after_opening_script_tag() {
 }
 
 #[test]
+fn vue_extractor_counts_lone_cr_as_line_break_after_opening_script_tag() {
+    let source = "<script>\rconst value = 1\r</script>";
+
+    let units = extract_vue_script_units(
+        std::path::Path::new("src/Widget.vue"),
+        "src/Widget.vue",
+        source,
+    )
+    .unwrap();
+
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0].line_markers[0].generated_line, 1);
+    assert_eq!(units[0].line_markers[0].original_line, 2);
+    assert_eq!(
+        units[0].source_text.split_terminator('\r').next(),
+        Some("const value = 1")
+    );
+}
+
+#[test]
 fn vue_extractor_tolerates_spaced_script_lang_attribute() {
     let source = r#"<script setup lang = "ts">
 const value: number = 1
@@ -152,6 +193,36 @@ const value: number = 1
         "src/Widget.vue?script=setup&lang=ts"
     );
     assert_eq!(syntax_for_unit(&units[0]), JavaScriptSyntax::TypeScript);
+}
+
+#[test]
+fn vue_extractor_preserves_tsx_and_jsx_lang_attributes() {
+    let source = r#"<script setup lang = "TSX">
+const view = <Widget />
+</script>
+<script lang='jsx'>
+const view = <Widget />
+</script>
+"#;
+
+    let units = extract_vue_script_units(
+        std::path::Path::new("src/Widget.vue"),
+        "src/Widget.vue",
+        source,
+    )
+    .unwrap();
+
+    assert_eq!(units.len(), 2);
+    assert_eq!(
+        units[0].relative_path,
+        "src/Widget.vue?script=setup&lang=tsx"
+    );
+    assert_eq!(syntax_for_unit(&units[0]), JavaScriptSyntax::Tsx);
+    assert_eq!(
+        units[1].relative_path,
+        "src/Widget.vue?script=normal&lang=jsx"
+    );
+    assert_eq!(syntax_for_unit(&units[1]), JavaScriptSyntax::Jsx);
 }
 
 #[test]

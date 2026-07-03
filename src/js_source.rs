@@ -34,7 +34,14 @@ pub fn discover_js_sources(config: &AnalyzeConfig) -> Result<Vec<SourceUnit>> {
     let excludes = build_excludes(config)?;
     let mut units = Vec::new();
 
-    for entry in WalkDir::new(&root) {
+    for entry in WalkDir::new(&root).into_iter().filter_entry(|entry| {
+        let path = entry.path();
+        let rel = path.strip_prefix(&root).unwrap_or(path);
+        let relative_path = normalize_path(rel);
+        relative_path.is_empty()
+            || !entry.file_type().is_dir()
+            || !is_excluded_dir(&excludes, &relative_path)
+    }) {
         let entry = entry.map_err(|err| {
             let path = err.path().unwrap_or(root.as_path()).display().to_string();
             anyhow::Error::new(err).context(format!("failed to traverse {path}"))
@@ -120,11 +127,11 @@ pub fn extract_vue_script_units(
 }
 
 pub fn syntax_for_unit(unit: &SourceUnit) -> JavaScriptSyntax {
-    if unit.relative_path.ends_with(".tsx") {
+    if unit.relative_path.ends_with(".tsx") || unit.relative_path.contains("&lang=tsx") {
         JavaScriptSyntax::Tsx
     } else if unit.relative_path.ends_with(".ts") || unit.relative_path.contains("&lang=ts") {
         JavaScriptSyntax::TypeScript
-    } else if unit.relative_path.ends_with(".jsx") {
+    } else if unit.relative_path.ends_with(".jsx") || unit.relative_path.contains("&lang=jsx") {
         JavaScriptSyntax::Jsx
     } else {
         JavaScriptSyntax::JavaScript
@@ -182,14 +189,25 @@ fn has_attr(attrs: &str, attr: &str) -> bool {
 }
 
 fn script_lang(attrs: &str) -> &'static str {
-    if iter_attrs(attrs).any(|(name, value)| {
-        name.eq_ignore_ascii_case("lang")
-            && value.is_some_and(|value| value.eq_ignore_ascii_case("ts"))
-    }) {
-        "ts"
-    } else {
-        "js"
+    for (_, value) in iter_attrs(attrs).filter(|(name, _)| name.eq_ignore_ascii_case("lang")) {
+        let Some(value) = value else {
+            continue;
+        };
+        if value.eq_ignore_ascii_case("tsx") {
+            return "tsx";
+        }
+        if value.eq_ignore_ascii_case("jsx") {
+            return "jsx";
+        }
+        if value.eq_ignore_ascii_case("ts") {
+            return "ts";
+        }
+        if value.eq_ignore_ascii_case("js") {
+            return "js";
+        }
     }
+
+    "js"
 }
 
 fn iter_attrs(attrs: &str) -> impl Iterator<Item = (&str, Option<&str>)> {
@@ -268,11 +286,29 @@ impl<'a> Iterator for AttrIter<'a> {
 }
 
 fn line_number_at(source_text: &str, byte_offset: usize) -> usize {
-    source_text[..byte_offset]
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count()
-        + 1
+    let bytes = &source_text.as_bytes()[..byte_offset];
+    let mut line = 1;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\n' => {
+                line += 1;
+                index += 1;
+            }
+            b'\r' => {
+                line += 1;
+                index += if bytes.get(index + 1) == Some(&b'\n') {
+                    2
+                } else {
+                    1
+                };
+            }
+            _ => index += 1,
+        }
+    }
+
+    line
 }
 
 fn first_content_line_start(source_text: &str, content_start: usize) -> usize {
@@ -285,4 +321,10 @@ fn first_content_line_start(source_text: &str, content_start: usize) -> usize {
     } else {
         content_start
     }
+}
+
+fn is_excluded_dir(excludes: &globset::GlobSet, relative_path: &str) -> bool {
+    is_excluded(excludes, relative_path)
+        || is_excluded(excludes, &format!("{relative_path}/"))
+        || is_excluded(excludes, &format!("{relative_path}/__probe__"))
 }
