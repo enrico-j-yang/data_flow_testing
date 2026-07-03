@@ -19,6 +19,31 @@ use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyzeLanguage {
+    Python,
+    C,
+    JavaScript,
+    TypeScript,
+    JavaScriptTypeScript,
+}
+
+pub fn parse_analyze_language(value: &str) -> Result<AnalyzeLanguage> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "python" | "py" => Ok(AnalyzeLanguage::Python),
+        "c" => Ok(AnalyzeLanguage::C),
+        "javascript" | "js" => Ok(AnalyzeLanguage::JavaScript),
+        "typescript" | "ts" => Ok(AnalyzeLanguage::TypeScript),
+        "js-ts" | "jsts" | "javascript-typescript" => {
+            Ok(AnalyzeLanguage::JavaScriptTypeScript)
+        }
+        other => bail!(
+            "unsupported language '{}'; supported languages are python, c, javascript/js, typescript/ts, and js-ts",
+            other
+        ),
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "data-flow-analyzer",
@@ -122,13 +147,13 @@ fn run_analyze(
     fs::create_dir_all(cfg.out.join("data"))
         .with_context(|| format!("failed to create output directory {}", cfg.out.display()))?;
 
-    let mut cache = match cfg.lang.as_str() {
-        "python" => analyze_python(&cfg)?,
-        "c" => analyze_c(&cfg)?,
-        other => bail!(
-            "unsupported language '{}'; supported languages are 'python' and 'c'",
-            other
-        ),
+    let language = parse_analyze_language(&cfg.lang)?;
+    let mut cache = match language {
+        AnalyzeLanguage::Python => analyze_python(&cfg)?,
+        AnalyzeLanguage::C => analyze_c(&cfg)?,
+        AnalyzeLanguage::JavaScript
+        | AnalyzeLanguage::TypeScript
+        | AnalyzeLanguage::JavaScriptTypeScript => bail!("JS/TS analysis is not wired yet"),
     };
 
     compute_def_use_edges(&mut cache);
