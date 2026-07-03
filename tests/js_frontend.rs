@@ -93,6 +93,95 @@ const value: number = normal
 }
 
 #[test]
+fn vue_extractor_starts_source_text_at_first_script_content_line() {
+    let source = "<template />\n<script>\nexport const value = 1\n</script>\n";
+
+    let units = extract_vue_script_units(
+        std::path::Path::new("src/Widget.vue"),
+        "src/Widget.vue",
+        source,
+    )
+    .unwrap();
+
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0].line_markers[0].generated_line, 1);
+    assert_eq!(units[0].line_markers[0].original_line, 3);
+    assert_eq!(
+        units[0].source_text.lines().next(),
+        Some("export const value = 1")
+    );
+}
+
+#[test]
+fn vue_extractor_trims_crlf_after_opening_script_tag() {
+    let source = "<template />\r\n<script>\r\nexport const value = 1\r\n</script>\r\n";
+
+    let units = extract_vue_script_units(
+        std::path::Path::new("src/Widget.vue"),
+        "src/Widget.vue",
+        source,
+    )
+    .unwrap();
+
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0].line_markers[0].generated_line, 1);
+    assert_eq!(units[0].line_markers[0].original_line, 3);
+    assert_eq!(
+        units[0].source_text.lines().next(),
+        Some("export const value = 1")
+    );
+}
+
+#[test]
+fn vue_extractor_tolerates_spaced_script_lang_attribute() {
+    let source = r#"<script setup lang = "ts">
+const value: number = 1
+</script>
+"#;
+
+    let units = extract_vue_script_units(
+        std::path::Path::new("src/Widget.vue"),
+        "src/Widget.vue",
+        source,
+    )
+    .unwrap();
+
+    assert_eq!(units.len(), 1);
+    assert_eq!(
+        units[0].relative_path,
+        "src/Widget.vue?script=setup&lang=ts"
+    );
+    assert_eq!(syntax_for_unit(&units[0]), JavaScriptSyntax::TypeScript);
+}
+
+#[test]
+fn vue_extractor_ignores_scripts_inside_html_comments() {
+    let source = r#"
+<!--
+<script>
+const ignored = true
+</script>
+-->
+<script>
+const real = true
+</script>
+"#;
+
+    let units = extract_vue_script_units(
+        std::path::Path::new("src/Widget.vue"),
+        "src/Widget.vue",
+        source,
+    )
+    .unwrap();
+
+    assert_eq!(units.len(), 1);
+    assert_eq!(
+        units[0].source_text.lines().next(),
+        Some("const real = true")
+    );
+}
+
+#[test]
 fn syntax_classification_distinguishes_tsx_from_typescript() {
     let ts = data_flow_analyzer::source::SourceUnit {
         absolute_path: "src/app.ts".into(),

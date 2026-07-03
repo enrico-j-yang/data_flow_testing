@@ -81,14 +81,14 @@ pub fn extract_vue_script_units(
     let mut units = Vec::new();
     let mut cursor = 0;
 
-    while let Some(script_offset) = source_text[cursor..].find("<script") {
-        let script_start = cursor + script_offset;
+    while let Some(script_start) = find_next_script_start(source_text, cursor) {
         let Some(open_end_offset) = source_text[script_start..].find('>') else {
             break;
         };
         let open_end = script_start + open_end_offset;
         let attrs = &source_text[script_start + "<script".len()..open_end];
-        let content_start = open_end + 1;
+        let raw_content_start = open_end + 1;
+        let content_start = first_content_line_start(source_text, raw_content_start);
         let Some(close_offset) = source_text[content_start..].find("</script>") else {
             break;
         };
@@ -109,10 +109,7 @@ pub fn extract_vue_script_units(
             line_markers: vec![LineMarker {
                 generated_line: 1,
                 original_file: relative_path.to_string(),
-                original_line: line_number_at(
-                    source_text,
-                    first_content_line_start(source_text, content_start),
-                ),
+                original_line: line_number_at(source_text, content_start),
             }],
         });
 
@@ -158,21 +155,115 @@ fn is_js_family_path(path: &Path) -> bool {
     )
 }
 
+fn find_next_script_start(source_text: &str, mut cursor: usize) -> Option<usize> {
+    loop {
+        let rest = &source_text[cursor..];
+        let script_offset = rest.find("<script")?;
+        let comment_offset = rest.find("<!--");
+
+        if let Some(comment_offset) = comment_offset
+            && comment_offset < script_offset
+        {
+            let comment_start = cursor + comment_offset;
+            let Some(comment_end_offset) = source_text[comment_start + "<!--".len()..].find("-->")
+            else {
+                return None;
+            };
+            cursor = comment_start + "<!--".len() + comment_end_offset + "-->".len();
+            continue;
+        }
+
+        return Some(cursor + script_offset);
+    }
+}
+
 fn has_attr(attrs: &str, attr: &str) -> bool {
-    attrs.split_whitespace().any(|part| {
-        let name = part.split('=').next().unwrap_or(part);
-        name == attr
-    })
+    iter_attrs(attrs).any(|(name, _)| name.eq_ignore_ascii_case(attr))
 }
 
 fn script_lang(attrs: &str) -> &'static str {
-    if attrs
-        .split_whitespace()
-        .any(|part| part == "lang=\"ts\"" || part == "lang='ts'" || part == "lang=ts")
-    {
+    if iter_attrs(attrs).any(|(name, value)| {
+        name.eq_ignore_ascii_case("lang")
+            && value.is_some_and(|value| value.eq_ignore_ascii_case("ts"))
+    }) {
         "ts"
     } else {
         "js"
+    }
+}
+
+fn iter_attrs(attrs: &str) -> impl Iterator<Item = (&str, Option<&str>)> {
+    AttrIter { attrs, cursor: 0 }
+}
+
+struct AttrIter<'a> {
+    attrs: &'a str,
+    cursor: usize,
+}
+
+impl<'a> Iterator for AttrIter<'a> {
+    type Item = (&'a str, Option<&'a str>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let bytes = self.attrs.as_bytes();
+        while self.cursor < bytes.len()
+            && (bytes[self.cursor].is_ascii_whitespace() || bytes[self.cursor] == b'/')
+        {
+            self.cursor += 1;
+        }
+        if self.cursor >= bytes.len() {
+            return None;
+        }
+
+        let name_start = self.cursor;
+        while self.cursor < bytes.len()
+            && !bytes[self.cursor].is_ascii_whitespace()
+            && bytes[self.cursor] != b'='
+            && bytes[self.cursor] != b'/'
+        {
+            self.cursor += 1;
+        }
+        let name = &self.attrs[name_start..self.cursor];
+
+        while self.cursor < bytes.len() && bytes[self.cursor].is_ascii_whitespace() {
+            self.cursor += 1;
+        }
+        if self.cursor >= bytes.len() || bytes[self.cursor] != b'=' {
+            return Some((name, None));
+        }
+
+        self.cursor += 1;
+        while self.cursor < bytes.len() && bytes[self.cursor].is_ascii_whitespace() {
+            self.cursor += 1;
+        }
+        if self.cursor >= bytes.len() {
+            return Some((name, Some("")));
+        }
+
+        let quote = bytes[self.cursor];
+        let value = if quote == b'\'' || quote == b'"' {
+            self.cursor += 1;
+            let value_start = self.cursor;
+            while self.cursor < bytes.len() && bytes[self.cursor] != quote {
+                self.cursor += 1;
+            }
+            let value = &self.attrs[value_start..self.cursor];
+            if self.cursor < bytes.len() {
+                self.cursor += 1;
+            }
+            value
+        } else {
+            let value_start = self.cursor;
+            while self.cursor < bytes.len()
+                && !bytes[self.cursor].is_ascii_whitespace()
+                && bytes[self.cursor] != b'/'
+            {
+                self.cursor += 1;
+            }
+            &self.attrs[value_start..self.cursor]
+        };
+
+        Some((name, Some(value)))
     }
 }
 
