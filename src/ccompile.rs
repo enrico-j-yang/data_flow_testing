@@ -16,7 +16,7 @@ pub fn build_preprocess_arguments(
         command
             .command
             .as_deref()
-            .and_then(shlex::split)
+            .and_then(split_compile_command)
             .ok_or_else(|| anyhow!("compile command is empty"))?
     } else {
         command.arguments.clone()
@@ -24,6 +24,7 @@ pub fn build_preprocess_arguments(
     let compiler = raw_args
         .first()
         .cloned()
+        .map(normalize_tool_arg)
         .ok_or_else(|| anyhow!("compile command is empty"))?;
     let mut args = vec![compiler, "-E".to_string(), "-dD".to_string()];
     let mut skip_next = false;
@@ -36,13 +37,95 @@ pub fn build_preprocess_arguments(
         match arg.as_str() {
             "-c" => {}
             "-o" => skip_next = true,
-            _ => args.push(arg.clone()),
+            _ => args.push(normalize_tool_arg(arg.clone())),
         }
     }
 
     args.push("-o".to_string());
-    args.push(output_path.to_string_lossy().to_string());
+    args.push(normalize_tool_arg(
+        output_path.to_string_lossy().to_string(),
+    ));
     Ok(args)
+}
+
+#[cfg(not(windows))]
+fn split_compile_command(command: &str) -> Option<Vec<String>> {
+    shlex::split(command)
+}
+
+#[cfg(windows)]
+fn split_compile_command(command: &str) -> Option<Vec<String>> {
+    let args = split_windows_command_line(command);
+    if args.is_empty() { None } else { Some(args) }
+}
+
+#[cfg(windows)]
+fn split_windows_command_line(command: &str) -> Vec<String> {
+    // CMake's compile_commands.json stores a Windows command line, not a POSIX shell line.
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut started = false;
+    let mut backslashes = 0usize;
+
+    for ch in command.chars() {
+        match ch {
+            '\\' => {
+                backslashes += 1;
+                started = true;
+            }
+            '"' => {
+                current.extend(std::iter::repeat_n('\\', backslashes / 2));
+                if backslashes.is_multiple_of(2) {
+                    in_quotes = !in_quotes;
+                    started = true;
+                } else {
+                    current.push('"');
+                }
+                backslashes = 0;
+            }
+            ch if ch.is_whitespace() && !in_quotes => {
+                current.extend(std::iter::repeat_n('\\', backslashes));
+                backslashes = 0;
+                if started {
+                    args.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            ch => {
+                current.extend(std::iter::repeat_n('\\', backslashes));
+                backslashes = 0;
+                current.push(ch);
+                started = true;
+            }
+        }
+    }
+
+    current.extend(std::iter::repeat_n('\\', backslashes));
+    if started {
+        args.push(current);
+    }
+    args
+}
+
+#[cfg(not(windows))]
+fn normalize_tool_arg(arg: String) -> String {
+    arg
+}
+
+#[cfg(windows)]
+fn normalize_tool_arg(arg: String) -> String {
+    if let Some(rest) = arg.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else if let Some(rest) = arg.strip_prefix("//?/") {
+        rest.to_string()
+    } else if let Some(rest) = arg.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{rest}")
+    } else if let Some(rest) = arg.strip_prefix("\\\\?\\") {
+        rest.to_string()
+    } else {
+        arg
+    }
 }
 
 /// Parse the `# <line> "<file>"` preprocessor line markers emitted by GCC and
