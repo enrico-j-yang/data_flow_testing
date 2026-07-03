@@ -11,6 +11,7 @@ pub mod graph;
 pub mod ids;
 pub mod imports;
 pub mod ir;
+pub mod js_source;
 pub mod lang;
 pub mod paths;
 pub mod report;
