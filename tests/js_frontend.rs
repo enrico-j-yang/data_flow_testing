@@ -1,9 +1,10 @@
 use data_flow_analyzer::config::AnalyzeConfig;
+use data_flow_analyzer::ir::Place;
 use data_flow_analyzer::js_source::{
-    JavaScriptSyntax, discover_js_sources, extract_vue_script_units, syntax_for_unit,
+    discover_js_sources, extract_vue_script_units, syntax_for_unit, JavaScriptSyntax,
 };
-use data_flow_analyzer::lang::LanguageFrontend;
 use data_flow_analyzer::lang::javascript::JavaScriptFrontend;
+use data_flow_analyzer::lang::LanguageFrontend;
 use data_flow_analyzer::source::{LineMarker, SourceUnit};
 use std::fs;
 
@@ -35,12 +36,10 @@ fn javascript_frontend_records_parse_diagnostics_for_broken_code() {
     let cache = parse_js_unit("src/broken.ts", "export const = ;\n");
 
     assert_eq!(cache.files[0].parse_status, "partial");
-    assert!(
-        cache
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.kind == "parse-error")
-    );
+    assert!(cache
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.kind == "parse-error"));
 }
 
 #[test]
@@ -175,12 +174,93 @@ fn javascript_frontend_merges_units_in_deterministic_path_order() {
 
     assert_eq!(file_paths, vec!["src/a.ts", "src/m.ts", "src/z.ts"]);
     assert_eq!(module_paths, vec!["src/a.ts", "src/m.ts", "src/z.ts"]);
-    assert!(
-        cache
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.file == "src/a.ts")
+    assert!(cache
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.file == "src/a.ts"));
+}
+
+#[test]
+fn javascript_frontend_lowers_imports_functions_and_params() {
+    let cache = parse_js_unit(
+        "src/main.ts",
+        "import value, { source as local } from './dep'\n\
+         import type { Shape } from './types'\n\
+         export function compute(input: number) { return local(input) }\n",
     );
+
+    assert!(cache.modules[0].imports.iter().any(|import| {
+        import.module == "./dep"
+            && import.name.as_deref() == Some("default")
+            && import.alias.as_deref() == Some("value")
+            && import.resolution == "external"
+    }));
+    assert!(cache.modules[0].imports.iter().any(|import| {
+        import.module == "./dep"
+            && import.name.as_deref() == Some("source")
+            && import.alias.as_deref() == Some("local")
+            && import.level == 0
+    }));
+    assert!(!cache.modules[0]
+        .imports
+        .iter()
+        .any(|import| import.module == "./types"));
+
+    let compute = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "src/main.ts::compute")
+        .expect("expected compute function");
+    assert_eq!(compute.params, vec!["input"]);
+
+    assert!(cache.definitions.iter().any(|definition| {
+        definition.def_kind == "param"
+            && definition.function_id.as_deref() == Some(compute.function_id.as_str())
+            && matches!(
+                &definition.place,
+                Place::Local { name, .. } if name == "input"
+            )
+    }));
+    assert!(cache.uses.iter().any(|usage| {
+        usage.function_id.as_deref() == Some(compute.function_id.as_str())
+            && usage.context == "return value"
+    }));
+}
+
+#[test]
+fn javascript_frontend_lowers_arrows_classes_methods_and_cfgs() {
+    let cache = parse_js_unit(
+        "src/widgets.ts",
+        "const make = (value: number) => value + 1\n\
+         class Box { read(input: number) { return make(input) } }\n",
+    );
+
+    let make = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "src/widgets.ts::make")
+        .expect("expected make arrow function");
+    assert_eq!(make.params, vec!["value"]);
+
+    let method = cache
+        .functions
+        .iter()
+        .find(|function| function.qualified_name == "src/widgets.ts::Box.read")
+        .expect("expected Box.read method function");
+    let class = cache
+        .classes
+        .iter()
+        .find(|class| class.qualified_name == "src/widgets.ts::Box")
+        .expect("expected Box class");
+    assert!(class.methods.contains(&method.function_id));
+
+    let cfg = cache
+        .cfgs
+        .iter()
+        .find(|cfg| cfg.function_id == method.function_id)
+        .expect("expected method cfg");
+    assert!(cfg.blocks.iter().any(|block| block.block_kind == "Entry"));
+    assert!(cfg.blocks.iter().any(|block| block.block_kind == "Exit"));
 }
 
 #[test]
@@ -240,11 +320,9 @@ fn js_source_discovery_skips_vendor_and_cache_dirs() {
 
     assert_eq!(paths.len(), 2, "unexpected units: {paths:?}");
     assert!(paths.iter().any(|path| path == "src/app.ts"));
-    assert!(
-        paths
-            .iter()
-            .any(|path| path == "src/view.vue?script=setup&lang=ts")
-    );
+    assert!(paths
+        .iter()
+        .any(|path| path == "src/view.vue?script=setup&lang=ts"));
     assert!(!paths.iter().any(|path| path.contains("node_modules")));
     assert!(!paths.iter().any(|path| path.contains(".turbo")));
     assert!(!paths.iter().any(|path| path.contains("generated")));
@@ -285,11 +363,9 @@ const value: number = normal
     );
     assert_eq!(units[1].line_markers[0].generated_line, 1);
     assert_eq!(units[1].line_markers[0].original_line, 7);
-    assert!(
-        units[1]
-            .source_text
-            .contains("const value: number = normal")
-    );
+    assert!(units[1]
+        .source_text
+        .contains("const value: number = normal"));
 }
 
 #[test]
