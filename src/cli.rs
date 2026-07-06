@@ -6,8 +6,11 @@ use crate::csymbols::resolve_c_symbols;
 use crate::fs::discover_sources;
 use crate::imports::resolve_imports;
 use crate::ir::AnalysisCache;
+use crate::js_source::{JavaScriptSyntax, discover_js_sources, syntax_for_unit};
+use crate::js_symbols::resolve_js_family_bindings;
 use crate::lang::LanguageFrontend;
 use crate::lang::c::CFrontend;
+use crate::lang::javascript::JavaScriptFrontend;
 use crate::lang::python::PythonFrontend;
 use crate::paths::{PathQueryOptions, query_function_paths};
 use crate::report::write_report;
@@ -151,7 +154,7 @@ fn run_analyze(
         AnalyzeLanguage::C => analyze_c(&cfg)?,
         AnalyzeLanguage::JavaScript
         | AnalyzeLanguage::TypeScript
-        | AnalyzeLanguage::JavaScriptTypeScript => bail!("JS/TS analysis is not wired yet"),
+        | AnalyzeLanguage::JavaScriptTypeScript => analyze_js_ts(&cfg, language)?,
     };
 
     compute_def_use_edges(&mut cache);
@@ -230,6 +233,49 @@ fn analyze_c(cfg: &AnalyzeConfig) -> Result<AnalysisCache> {
         // Best-effort cleanup of the per-unit preprocessed outputs.
         let _ = fs::remove_dir_all(&preprocessed_dir);
     }
+    Ok(cache)
+}
+
+fn analyze_js_ts(cfg: &AnalyzeConfig, language: AnalyzeLanguage) -> Result<AnalysisCache> {
+    let mut units = discover_js_sources(cfg)?;
+    match language {
+        AnalyzeLanguage::JavaScript => {
+            units.retain(|unit| {
+                matches!(
+                    syntax_for_unit(unit),
+                    JavaScriptSyntax::JavaScript | JavaScriptSyntax::Jsx
+                )
+            });
+        }
+        AnalyzeLanguage::TypeScript => {
+            units.retain(|unit| {
+                matches!(
+                    syntax_for_unit(unit),
+                    JavaScriptSyntax::TypeScript | JavaScriptSyntax::Tsx
+                )
+            });
+        }
+        AnalyzeLanguage::JavaScriptTypeScript => {}
+        AnalyzeLanguage::Python | AnalyzeLanguage::C => {}
+    }
+
+    if units.is_empty() {
+        bail!(
+            "no JS/TS/Vue source units found under {}",
+            cfg.input.display()
+        );
+    }
+
+    let mut cache = JavaScriptFrontend::new().parse_units(&units)?;
+    if cfg.fail_on_parse_error
+        && cache
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.kind == "parse-error")
+    {
+        bail!("JS/TS parse errors encountered and fail_on_parse_error is true");
+    }
+    resolve_js_family_bindings(&mut cache);
     Ok(cache)
 }
 
