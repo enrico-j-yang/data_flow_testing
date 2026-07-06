@@ -409,6 +409,71 @@ defineExpose({ model })
 }
 
 #[test]
+fn js_relative_import_bridge_links_runtime_import_defs() {
+    let units = vec![
+        SourceUnit {
+            absolute_path: "src/dep.ts".into(),
+            relative_path: "src/dep.ts".to_string(),
+            source_text: "export const source = 1\n".to_string(),
+            original_path: None,
+            line_markers: Vec::new(),
+        },
+        SourceUnit {
+            absolute_path: "src/main.ts".into(),
+            relative_path: "src/main.ts".to_string(),
+            source_text: "import { source as local } from './dep'\nexport const result = local\n"
+                .to_string(),
+            original_path: None,
+            line_markers: Vec::new(),
+        },
+    ];
+    let mut cache = JavaScriptFrontend::new().parse_units(&units).unwrap();
+    data_flow_analyzer::js_symbols::resolve_js_family_bindings(&mut cache);
+
+    let import_def = cache
+        .definitions
+        .iter()
+        .find(|definition| definition.def_kind == "import" && definition.expr == "./dep:source")
+        .unwrap();
+    assert!(
+        import_def
+            .deps
+            .iter()
+            .any(|place| matches!(place, Place::Global { name, .. } if name == "source")),
+        "expected import definition to depend on src/dep.ts::source"
+    );
+}
+
+#[test]
+fn vue_same_file_bridge_marks_script_setup_access_to_normal_script() {
+    let units = vec![
+        SourceUnit {
+            absolute_path: "src/Widget.vue".into(),
+            relative_path: "src/Widget.vue?script=normal&lang=ts".to_string(),
+            source_text: "export const shared = 1\n".to_string(),
+            original_path: Some("src/Widget.vue".into()),
+            line_markers: Vec::new(),
+        },
+        SourceUnit {
+            absolute_path: "src/Widget.vue".into(),
+            relative_path: "src/Widget.vue?script=setup&lang=ts".to_string(),
+            source_text: "const value = shared\n".to_string(),
+            original_path: Some("src/Widget.vue".into()),
+            line_markers: Vec::new(),
+        },
+    ];
+    let mut cache = JavaScriptFrontend::new().parse_units(&units).unwrap();
+    data_flow_analyzer::js_symbols::resolve_js_family_bindings(&mut cache);
+
+    assert!(
+        cache
+            .var_dependency_edges
+            .iter()
+            .any(|edge| edge.dep_kind == "vue-script-setup")
+    );
+}
+
+#[test]
 fn js_source_discovery_skips_vendor_and_cache_dirs() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();

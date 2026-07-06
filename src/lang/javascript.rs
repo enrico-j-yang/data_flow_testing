@@ -189,6 +189,7 @@ fn lower_toplevel_node(
                     class_stack,
                 );
             }
+            record_exported_bindings(cache, unit, node, module_id, module_scope_id, module_index);
         }
         "function_declaration" => {
             lower_function_node(
@@ -217,6 +218,152 @@ fn lower_toplevel_node(
         }
         _ => {}
     }
+}
+
+fn record_exported_bindings(
+    cache: &mut AnalysisCache,
+    unit: &SourceUnit,
+    node: Node<'_>,
+    module_id: &str,
+    module_scope_id: &str,
+    module_index: usize,
+) {
+    let exports = exported_bindings(unit, node);
+    if let Some(module_record) = cache.modules.get_mut(module_index) {
+        for export in exports.iter().map(|export| export.exported_name.as_str()) {
+            if !module_record
+                .exports
+                .iter()
+                .any(|existing| existing == export)
+            {
+                module_record.exports.push(export.to_string());
+            }
+        }
+    }
+    for export in exports {
+        cache.definitions.push(Definition {
+            def_id: stable_id(
+                "D",
+                SCHEMA_VERSION,
+                &[
+                    &unit.relative_path,
+                    module_id,
+                    "export",
+                    &export.exported_name,
+                    &export.node.start_byte().to_string(),
+                ],
+            ),
+            place: Place::Global {
+                module_id: module_id.to_string(),
+                name: export.exported_name,
+            },
+            def_kind: "export".to_string(),
+            scope_id: module_scope_id.to_string(),
+            function_id: None,
+            span: span_for(unit, export.node),
+            expr: export.local_name.clone(),
+            deps: if export.local_name.is_empty() {
+                Vec::new()
+            } else {
+                vec![Place::Local {
+                    scope_id: module_scope_id.to_string(),
+                    name: export.local_name,
+                }]
+            },
+        });
+    }
+}
+
+struct ExportBinding<'a> {
+    exported_name: String,
+    local_name: String,
+    node: Node<'a>,
+}
+
+fn exported_bindings<'a>(unit: &SourceUnit, node: Node<'a>) -> Vec<ExportBinding<'a>> {
+    let is_default = has_direct_child_kind(node, "default");
+    let mut bindings = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "lexical_declaration" | "variable_declaration" => {
+                collect_variable_export_bindings(unit, child, &mut bindings);
+            }
+            "function_declaration" | "class_declaration" => {
+                let local_name = declaration_name(child, unit).unwrap_or_default();
+                bindings.push(ExportBinding {
+                    exported_name: if is_default {
+                        "default".to_string()
+                    } else {
+                        local_name.clone()
+                    },
+                    local_name,
+                    node: child,
+                });
+            }
+            "export_clause" => {
+                collect_export_clause_bindings(unit, child, &mut bindings);
+            }
+            _ => {}
+        }
+    }
+    bindings.retain(|binding| !binding.exported_name.is_empty());
+    bindings
+}
+
+fn collect_variable_export_bindings<'a>(
+    unit: &SourceUnit,
+    node: Node<'a>,
+    bindings: &mut Vec<ExportBinding<'a>>,
+) {
+    let mut cursor = node.walk();
+    for declarator in node
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "variable_declarator")
+    {
+        let Some(name_node) = declarator
+            .child_by_field_name("name")
+            .or_else(|| direct_named_child(declarator, &["identifier"]))
+        else {
+            continue;
+        };
+        for name in binding_names(name_node, unit) {
+            bindings.push(ExportBinding {
+                exported_name: name.clone(),
+                local_name: name,
+                node: name_node,
+            });
+        }
+    }
+}
+
+fn collect_export_clause_bindings<'a>(
+    unit: &SourceUnit,
+    node: Node<'a>,
+    bindings: &mut Vec<ExportBinding<'a>>,
+) {
+    let mut cursor = node.walk();
+    for specifier in node
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "export_specifier")
+    {
+        let names = named_descendants(specifier, unit, &["identifier", "property_identifier"]);
+        let Some(local) = names.first().copied() else {
+            continue;
+        };
+        let exported = names.get(1).copied().unwrap_or(local);
+        bindings.push(ExportBinding {
+            exported_name: exported.to_string(),
+            local_name: local.to_string(),
+            node: specifier,
+        });
+    }
+}
+
+fn declaration_name(node: Node<'_>, unit: &SourceUnit) -> Option<String> {
+    node.child_by_field_name("name")
+        .or_else(|| direct_named_child(node, &["identifier", "type_identifier"]))
+        .map(|name| text(name, unit).to_string())
 }
 
 fn lower_import_statement(

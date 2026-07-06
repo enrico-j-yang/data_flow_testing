@@ -12,6 +12,7 @@ pub mod ids;
 pub mod imports;
 pub mod ir;
 pub mod js_source;
+pub mod js_symbols;
 pub mod lang;
 pub mod paths;
 pub mod report;
