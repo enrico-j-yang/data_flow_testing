@@ -34,9 +34,7 @@ pub fn parse_analyze_language(value: &str) -> Result<AnalyzeLanguage> {
         "c" => Ok(AnalyzeLanguage::C),
         "javascript" | "js" => Ok(AnalyzeLanguage::JavaScript),
         "typescript" | "ts" => Ok(AnalyzeLanguage::TypeScript),
-        "js-ts" | "jsts" | "javascript-typescript" => {
-            Ok(AnalyzeLanguage::JavaScriptTypeScript)
-        }
+        "js-ts" | "jsts" | "javascript-typescript" => Ok(AnalyzeLanguage::JavaScriptTypeScript),
         other => bail!(
             "unsupported language '{}'; supported languages are python, c, javascript/js, typescript/ts, and js-ts",
             other

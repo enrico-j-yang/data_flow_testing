@@ -3,11 +3,26 @@ use data_flow_analyzer::cli::{AnalyzeLanguage, parse_analyze_language};
 
 #[test]
 fn js_family_language_aliases_are_recognized() {
-    assert_eq!(parse_analyze_language("javascript").unwrap(), AnalyzeLanguage::JavaScript);
-    assert_eq!(parse_analyze_language("js").unwrap(), AnalyzeLanguage::JavaScript);
-    assert_eq!(parse_analyze_language("typescript").unwrap(), AnalyzeLanguage::TypeScript);
-    assert_eq!(parse_analyze_language("ts").unwrap(), AnalyzeLanguage::TypeScript);
-    assert_eq!(parse_analyze_language("js-ts").unwrap(), AnalyzeLanguage::JavaScriptTypeScript);
+    assert_eq!(
+        parse_analyze_language("javascript").unwrap(),
+        AnalyzeLanguage::JavaScript
+    );
+    assert_eq!(
+        parse_analyze_language("js").unwrap(),
+        AnalyzeLanguage::JavaScript
+    );
+    assert_eq!(
+        parse_analyze_language("typescript").unwrap(),
+        AnalyzeLanguage::TypeScript
+    );
+    assert_eq!(
+        parse_analyze_language("ts").unwrap(),
+        AnalyzeLanguage::TypeScript
+    );
+    assert_eq!(
+        parse_analyze_language("js-ts").unwrap(),
+        AnalyzeLanguage::JavaScriptTypeScript
+    );
 }
 
 #[test]
