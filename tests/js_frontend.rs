@@ -1,3 +1,4 @@
+use data_flow_analyzer::analysis::{compute_def_use_edges, compute_var_dependencies};
 use data_flow_analyzer::config::AnalyzeConfig;
 use data_flow_analyzer::ir::Place;
 use data_flow_analyzer::js_source::{
@@ -355,6 +356,108 @@ function read(input) {
         })
         .count();
     assert_eq!(arg_reads, 1);
+}
+
+#[test]
+fn javascript_frontend_links_closure_like_object_method_reads_in_returned_objects() {
+    let mut cache = parse_js_unit(
+        "src/parser.ts",
+        r#"
+function createParser() {
+  let buffer = ''
+  return {
+    consume(textPart) {
+      buffer += textPart
+      const openTagIndex = buffer.indexOf(TAG_OPEN)
+      if (openTagIndex < 0)
+        return
+    },
+  }
+}
+"#,
+    );
+    compute_def_use_edges(&mut cache);
+
+    let buffer_def = cache
+        .definitions
+        .iter()
+        .find(|definition| {
+            definition.span.line == 3
+                && matches!(&definition.place, Place::Local { name, .. } if name == "buffer")
+        })
+        .unwrap();
+    let buffer_use = cache
+        .uses
+        .iter()
+        .find(|use_site| {
+            use_site.span.line == 7
+                && matches!(&use_site.place, Place::Local { name, .. } if name == "buffer")
+        })
+        .unwrap();
+    let augmented_buffer_def = cache
+        .definitions
+        .iter()
+        .find(|definition| {
+            definition.span.line == 6
+                && matches!(&definition.place, Place::Local { name, .. } if name == "buffer")
+        })
+        .unwrap();
+    let augmented_buffer_use = cache
+        .uses
+        .iter()
+        .find(|use_site| {
+            use_site.span.line == 6
+                && matches!(&use_site.place, Place::Local { name, .. } if name == "buffer")
+        })
+        .unwrap();
+    assert!(
+        cache
+            .def_use_edges
+            .iter()
+            .any(|edge| edge.def_id == augmented_buffer_def.def_id
+                && edge.use_id == buffer_use.use_id),
+        "expected line 6 buffer definition to reach line 7 buffer use"
+    );
+    assert!(
+        cache.def_use_edges.iter().any(|edge| {
+            edge.def_id == buffer_def.def_id && edge.use_id == augmented_buffer_use.use_id
+        }),
+        "expected line 3 buffer definition to reach line 6 augmented assignment read"
+    );
+
+    let open_tag_def = cache
+        .definitions
+        .iter()
+        .find(|definition| {
+            definition.span.line == 7
+                && matches!(&definition.place, Place::Local { name, .. } if name == "openTagIndex")
+        })
+        .unwrap();
+    let open_tag_use = cache
+        .uses
+        .iter()
+        .find(|use_site| {
+            use_site.span.line == 8
+                && matches!(&use_site.place, Place::Local { name, .. } if name == "openTagIndex")
+        })
+        .unwrap();
+    assert!(
+        cache.def_use_edges.iter().any(|edge| {
+            edge.def_id == open_tag_def.def_id && edge.use_id == open_tag_use.use_id
+        }),
+        "expected line 7 openTagIndex definition to reach line 8 use"
+    );
+    let buffer_use_id = buffer_use.use_id.clone();
+    let open_tag_def_id = open_tag_def.def_id.clone();
+
+    compute_var_dependencies(&mut cache);
+    assert!(
+        cache
+            .var_dependency_edges
+            .iter()
+            .any(|edge| { edge.source_id == buffer_use_id && edge.target_id == open_tag_def_id }),
+        "expected line 6 buffer use to feed the openTagIndex definition"
+    );
 }
 
 #[test]

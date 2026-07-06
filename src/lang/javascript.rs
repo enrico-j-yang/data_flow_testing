@@ -604,7 +604,7 @@ fn lower_variable_declaration(
                 def_kind: macro_kind.unwrap_or("assign").to_string(),
                 scope_id: scope_id.to_string(),
                 function_id: function_id.map(str::to_string),
-                span: span_for(unit, name_node),
+                span: span_for(unit, declarator),
                 expr: value_node
                     .map(|value| text(value, unit).trim().to_string())
                     .unwrap_or_default(),
@@ -874,8 +874,19 @@ fn lower_statement_tree(
             lower_assignment_expression(cache, unit, node, function_id, scope_id);
             return;
         }
+        "if_statement" | "while_statement" | "for_statement" | "for_in_statement" => {
+            lower_condition_uses(cache, unit, node, function_id, scope_id);
+        }
         "return_statement" => {
-            lower_return_statement(cache, unit, node, function_id, scope_id);
+            lower_return_statement(
+                cache,
+                unit,
+                node,
+                module_id,
+                function_id,
+                scope_id,
+                class_stack,
+            );
             return;
         }
         "call_expression" => {
@@ -932,9 +943,14 @@ fn lower_assignment_expression(
         .child_by_field_name("right")
         .or_else(|| node.named_child(1));
     let mut deps = Vec::new();
+    if node.kind() == "augmented_assignment_expression" {
+        let uses = collect_expression_uses(unit, left, Some(function_id), scope_id, "assign:lhs");
+        deps.extend(uses.iter().map(|use_site| use_site.place.clone()));
+        cache.uses.extend(uses);
+    }
     if let Some(right) = right {
         let uses = collect_expression_uses(unit, right, Some(function_id), scope_id, "assign:rhs");
-        deps = uses.iter().map(|use_site| use_site.place.clone()).collect();
+        deps.extend(uses.iter().map(|use_site| use_site.place.clone()));
         cache.uses.extend(uses);
     }
     let def_id = stable_id(
@@ -966,12 +982,31 @@ fn lower_assignment_expression(
     }
 }
 
-fn lower_return_statement(
+fn lower_condition_uses(
     cache: &mut AnalysisCache,
     unit: &SourceUnit,
     node: Node<'_>,
     function_id: &str,
     scope_id: &str,
+) {
+    let condition = node
+        .child_by_field_name("condition")
+        .or_else(|| node.named_child(0));
+    if let Some(condition) = condition {
+        let uses =
+            collect_expression_uses(unit, condition, Some(function_id), scope_id, "condition");
+        cache.uses.extend(uses);
+    }
+}
+
+fn lower_return_statement(
+    cache: &mut AnalysisCache,
+    unit: &SourceUnit,
+    node: Node<'_>,
+    module_id: &str,
+    function_id: &str,
+    scope_id: &str,
+    class_stack: &mut Vec<String>,
 ) {
     let value = first_return_value(node);
     let value_text = value.map(|value| text(value, unit).trim()).unwrap_or("");
@@ -980,6 +1015,15 @@ fn lower_return_statement(
             collect_expression_uses(unit, value, Some(function_id), scope_id, "return value");
         cache.uses.extend(uses);
         lower_calls_in_expression(cache, unit, value, Some(function_id), scope_id, None);
+        lower_embedded_statements(
+            cache,
+            unit,
+            value,
+            module_id,
+            function_id,
+            scope_id,
+            class_stack,
+        );
     }
     cache.uses.push(Use {
         use_id: stable_id(
@@ -1070,7 +1114,7 @@ fn walk_expression(
     context: &str,
     uses: &mut Vec<Use>,
 ) {
-    if is_type_node(node) {
+    if is_type_node(node) || is_nested_function_boundary(node.kind()) {
         return;
     }
     match node.kind() {
@@ -1121,6 +1165,9 @@ fn walk_expression(
                 span: span_for(unit, node),
                 context: context.to_string(),
             });
+            if let Some(base) = node.named_child(0) {
+                walk_expression(unit, base, function_id, scope_id, context, uses);
+            }
             if node.kind() == "subscript_expression" {
                 if let Some(index) = node.named_child(1) {
                     walk_expression(unit, index, function_id, scope_id, context, uses);
@@ -1135,6 +1182,9 @@ fn walk_expression(
                     }
                 }
                 return;
+            }
+            if let Some(callee) = node.named_child(0) {
+                walk_call_receiver(unit, callee, function_id, scope_id, context, uses);
             }
             if let Some(arguments) = direct_named_child(node, &["arguments"]) {
                 let mut cursor = arguments.walk();
@@ -1155,6 +1205,107 @@ fn walk_expression(
                 walk_expression(unit, child, function_id, scope_id, context, uses);
             }
         }
+    }
+}
+
+fn walk_call_receiver(
+    unit: &SourceUnit,
+    callee: Node<'_>,
+    function_id: Option<&str>,
+    scope_id: &str,
+    context: &str,
+    uses: &mut Vec<Use>,
+) {
+    match callee.kind() {
+        "member_expression" | "subscript_expression" => {
+            if let Some(base) = callee.named_child(0) {
+                walk_expression(unit, base, function_id, scope_id, context, uses);
+            }
+            if callee.kind() == "subscript_expression" {
+                if let Some(index) = callee.named_child(1) {
+                    walk_expression(unit, index, function_id, scope_id, context, uses);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn lower_embedded_statements(
+    cache: &mut AnalysisCache,
+    unit: &SourceUnit,
+    node: Node<'_>,
+    module_id: &str,
+    function_id: &str,
+    scope_id: &str,
+    class_stack: &mut Vec<String>,
+) {
+    match node.kind() {
+        "lexical_declaration" | "variable_declaration" => {
+            lower_variable_declaration(
+                cache,
+                unit,
+                node,
+                module_id,
+                scope_id,
+                Some(function_id),
+                class_stack,
+            );
+            return;
+        }
+        "assignment_expression" | "augmented_assignment_expression" => {
+            lower_assignment_expression(cache, unit, node, function_id, scope_id);
+            return;
+        }
+        "if_statement" | "while_statement" | "for_statement" | "for_in_statement" => {
+            lower_condition_uses(cache, unit, node, function_id, scope_id);
+        }
+        "return_statement" => {
+            lower_return_statement(
+                cache,
+                unit,
+                node,
+                module_id,
+                function_id,
+                scope_id,
+                class_stack,
+            );
+            return;
+        }
+        "call_expression" => {
+            if is_define_expose_call(node, unit) {
+                if let Some(arguments) = direct_named_child(node, &["arguments"]) {
+                    let uses = collect_expression_uses(
+                        unit,
+                        arguments,
+                        Some(function_id),
+                        scope_id,
+                        "vue-expose",
+                    );
+                    cache.uses.extend(uses);
+                }
+            } else if !is_vue_compiler_macro_call(node, unit) {
+                let uses =
+                    collect_expression_uses(unit, node, Some(function_id), scope_id, "call:arg");
+                cache.uses.extend(uses);
+                lower_calls_in_expression(cache, unit, node, Some(function_id), scope_id, None);
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        lower_embedded_statements(
+            cache,
+            unit,
+            child,
+            module_id,
+            function_id,
+            scope_id,
+            class_stack,
+        );
     }
 }
 
@@ -1470,6 +1621,18 @@ fn is_type_node(node: Node<'_>) -> bool {
             | "tuple_type"
             | "type_identifier"
             | "property_signature"
+    )
+}
+
+fn is_nested_function_boundary(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_declaration"
+            | "function_expression"
+            | "arrow_function"
+            | "method_definition"
+            | "generator_function_declaration"
+            | "generator_function"
     )
 }
 
