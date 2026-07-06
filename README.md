@@ -1,6 +1,6 @@
 # Data Flow Analyzer
 
-Rust static data-flow analyzer. It targets Python and C via tree-sitter and produces:
+Rust static data-flow analyzer. It targets Python, C, and JS/TS/Vue via tree-sitter and produces:
 
 - def-use analysis
 - variable-dependency analysis
@@ -15,6 +15,8 @@ The current release supports:
 
 - Python parsing and lowering into a language-neutral IR
 - C parsing of CMake-based projects with auto-generated compile databases
+- JavaScript/TypeScript parsing and lowering into the shared IR
+- Vue SFC `<script>` and `<script setup>` analysis
 - definitions, uses, imports, captures, and normalized attribute/subscript places
 - baseline CFG construction per function
 - reaching-definitions analysis
@@ -97,6 +99,20 @@ C-specific flags:
 
 C reports use the same layout as Python and additionally write
 `data/compile_commands.merged.json` for downstream consumers.
+
+## Analyze A JS/TS/Vue Codebase
+
+The analyzer can process JavaScript, TypeScript, JSX, TSX, MJS, CJS, and Vue
+SFC script blocks in one pass:
+
+```powershell
+cargo run -- analyze --lang js-ts --input D:\repos\temp\airi --out D:\tmp\airi-js-ts-dataflow
+```
+
+Vue support analyzes `<script>` and `<script setup>` blocks. Vue templates are
+not fully analyzed in the first version, although script bindings and compiler
+macros such as `defineProps`, `defineEmits`, and `defineModel` are represented
+conservatively in the shared IR.
 
 ## Query Def-Clear Paths
 
